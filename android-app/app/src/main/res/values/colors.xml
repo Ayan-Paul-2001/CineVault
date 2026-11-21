@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="cv_bg">#07090F</color>
+    <color name="cv_bg_elev">#0E121C</color>
+    <color name="cv_bg_card">#131826</color>
+    <color name="cv_bg_hover">#1A2133</color>
+    <color name="cv_border">#1FFFFFFF</color>
+    <color name="cv_text">#F3F6FC</color>
+    <color name="cv_text_muted">#94A3B8</color>
+    <color name="cv_text_dim">#64748B</color>
+    <color name="cv_accent">#E50914</color>
+    <color name="cv_accent_soft">#2AE50914</color>
+    <color name="cv_gold">#F59E0B</color>
+    <color name="cv_sky">#38BDF8</color>
+    <color name="cv_green">#22C55E</color>
+    <color name="cv_purple">#A855F7</color>
+    <color name="cv_teal">#14B8A6</color>
+    <color name="cv_danger">#EF4444</color>
+    <color name="cv_danger_soft">#26EF4444</color>
+</resources>

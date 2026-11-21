@@ -1,0 +1,27 @@
+{
+  "appVersion": "1.0.1",
+  "appDisplayVersion": "V1.0.1",
+  "appVersionCode": 2,
+  "version": "1.0.1",
+  "displayVersion": "V1.0.1",
+  "versionCode": 2,
+  "apkPackage": "CineVault.apk",
+  "apkSizeBytes": 14225474,
+  "sha256": "02735d0844a3c7ce3f27cadbb78d7bf0518a221a82bd47c8190158b1b856d9fd",
+  "changelog": [
+    "Fixed Android 15 edge-to-edge top app bar and bottom navigation inset padding.",
+    "Added dedicated Servers tab in the bottom menu bar for live 10-node Server Health, Auto-Sync scheduler, ICC session setup, and Public Release updates.",
+    "Switched auto-updates to public release/version.json with accessControl mandatory update support.",
+    "Fixed all 4 servers (DhakaFlix, ICC FTP Basic + Full Mode, CircleFTP, DiscoveryFTP): expanded BDIX cleartext allowlists, sanitized raw spaces and brackets in stream URLs, isolated server sync errors, and added automatic title cleanup and deduplication."
+  ],
+  "accessControl": {
+    "forceUpdateEnabled": false,
+    "forceAppUpdate": false,
+    "minAppVersion": "0.0.0",
+    "minVersion": "0.0.0",
+    "lockTitle": "Mandatory Update Required",
+    "lockMessage": "This version of CineVault is no longer supported. Please update to the latest version to continue using CineVault."
+  },
+  "otaGatewayOverrides": {},
+  "updatedAt": "2026-11-21T03:59:08.310Z"
+}

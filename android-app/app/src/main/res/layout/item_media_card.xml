@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="132dp"
+    android:layout_height="wrap_content"
+    android:clickable="true"
+    android:focusable="true"
+    android:foreground="?attr/selectableItemBackground"
+    android:orientation="vertical"
+    android:padding="4dp">
+
+    <FrameLayout
+        android:id="@+id/poster_frame"
+        android:layout_width="match_parent"
+        android:layout_height="186dp"
+        android:background="@drawable/bg_card_rounded"
+        android:clipToOutline="true">
+
+        <ImageView
+            android:id="@+id/card_poster"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="Poster"
+            android:scaleType="centerCrop" />
+
+        <!-- Fallback text overlay when no poster URL -->
+        <LinearLayout
+            android:id="@+id/card_fallback_box"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="bottom"
+            android:orientation="vertical"
+            android:padding="10dp"
+            android:visibility="gone">
+
+            <View
+                android:id="@+id/card_fallback_bar"
+                android:layout_width="22dp"
+                android:layout_height="3dp"
+                android:background="@color/cv_accent" />
+
+            <TextView
+                android:id="@+id/card_fallback_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:ellipsize="end"
+                android:maxLines="3"
+                android:textColor="#FFFFFF"
+                android:textSize="12.5sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/card_fallback_year"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="@color/cv_text_muted"
+                android:textSize="10.5sp" />
+        </LinearLayout>
+
+        <!-- Quality + Audio badges -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="6dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/card_quality_pill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@color/cv_accent"
+                android:paddingHorizontal="5dp"
+                android:paddingVertical="1.5dp"
+                android:textColor="#FFFFFF"
+                android:textSize="9.5sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/card_audio_pill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:background="@color/cv_sky"
+                android:paddingHorizontal="5dp"
+                android:paddingVertical="1.5dp"
+                android:textColor="#FFFFFF"
+                android:textSize="9.5sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- Optional Remove button -->
+        <ImageButton
+            android:id="@+id/card_remove_btn"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="5dp"
+            android:background="#CC000000"
+            android:contentDescription="Remove"
+            android:padding="4dp"
+            android:src="@drawable/ic_close"
+            android:visibility="gone" />
+
+        <!-- Continue Watching footer + progress bar -->
+        <LinearLayout
+            android:id="@+id/card_cw_footer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#CC000000"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/card_cw_label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:paddingHorizontal="6dp"
+                android:paddingVertical="3dp"
+                android:textColor="#FFFFFF"
+                android:textSize="10sp"
+                android:textStyle="bold" />
+
+            <ProgressBar
+                android:id="@+id/card_cw_progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="3.5dp"
+                android:max="100"
+                android:progressTint="@color/cv_accent" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/card_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textColor="@color/cv_text"
+        android:textSize="12.5sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/card_subtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/cv_text_muted"
+        android:textSize="11sp" />
+</LinearLayout>

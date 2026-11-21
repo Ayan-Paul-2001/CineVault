@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.CineVault" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/cv_accent</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">@color/cv_sky</item>
+        <item name="colorSurface">@color/cv_bg_elev</item>
+        <item name="colorOnSurface">@color/cv_text</item>
+        <item name="android:colorBackground">@color/cv_bg</item>
+        <item name="android:windowBackground">@color/cv_bg</item>
+        <item name="android:statusBarColor">@color/cv_bg</item>
+        <item name="android:navigationBarColor">@color/cv_bg_elev</item>
+    </style>
+
+    <style name="Theme.CineVault.Player" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/cv_accent</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>

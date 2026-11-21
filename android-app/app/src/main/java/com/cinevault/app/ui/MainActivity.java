@@ -182,7 +182,7 @@ public final class MainActivity extends AppCompatActivity {
         public void run() {
             app.ioExecutor.execute(() -> {
                 if (app.repository.isAutoSyncDue() && !app.repository.getSyncProgress().running) {
-                    app.repository.runSync("quick", () -> uiHandler.post(MainActivity.this::refreshVisibleTabAfterSync));
+                    app.repository.runSync("quick", true, () -> uiHandler.post(MainActivity.this::refreshSilentlyAfterBackgroundSync));
                 }
             });
             uiHandler.postDelayed(this, 5L * 60L * 1000L);
@@ -190,14 +190,15 @@ public final class MainActivity extends AppCompatActivity {
     };
 
     private final MediaRepository.SyncListener syncListener = p -> uiHandler.post(() -> {
-        topSyncProgress.setVisibility(p.running ? View.VISIBLE : View.GONE);
+        boolean showTopIndicator = p.running && !p.silent;
+        topSyncProgress.setVisibility(showTopIndicator ? View.VISIBLE : View.GONE);
         topSyncProgress.setProgress(p.percent);
-        syncStatusDot.setBackgroundColor(p.running ? 0xFF38BDF8 : 0xFF22C55E);
-        if (p.running) {
+        syncStatusDot.setBackgroundColor(showTopIndicator ? 0xFF38BDF8 : 0xFF22C55E);
+        if (showTopIndicator) {
             syncChipText.setText(p.percent + "%");
         } else {
             updateSyncChipCount();
-            homeSwipe.setRefreshing(false);
+            if (!p.running) homeSwipe.setRefreshing(false);
         }
         renderServersSyncProgress(p);
     });
@@ -508,7 +509,7 @@ public final class MainActivity extends AppCompatActivity {
 
         btnSrvDownloadUpdate.setOnClickListener(v -> {
             if (availableUpdate != null) {
-                UiHelper.openExternalBrowser(this, availableUpdate.downloadUrl, true);
+                UiHelper.downloadAppUpdateDirect(this, availableUpdate);
             }
         });
     }
@@ -776,10 +777,12 @@ public final class MainActivity extends AppCompatActivity {
 
                 if (initialBootstrap) {
                     int iccCount = feed.stats.bySource.containsKey("icc") ? feed.stats.bySource.get("icc") : 0;
-                    if (feed.stats.total == 0 || iccCount < 500) {
-                        triggerSync("full");
-                    } else if (shouldAutoSync) {
-                        triggerSync("quick");
+                    if (feed.stats.total == 0) {
+                        triggerSync("full", false);
+                    } else if (iccCount < 500) {
+                        uiHandler.postDelayed(() -> triggerSync("full", true), 2500L);
+                    } else if (shouldAutoSync || app.repository.isAutoSyncEnabled()) {
+                        uiHandler.postDelayed(() -> triggerSync("quick", true), 3500L);
                     } else {
                         app.ioExecutor.execute(() -> app.repository.checkAllServersHealth());
                     }
@@ -1084,7 +1087,24 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void triggerSync(String mode) {
-        app.ioExecutor.execute(() -> app.repository.runSync(mode, () -> uiHandler.post(this::refreshVisibleTabAfterSync)));
+        triggerSync(mode, false);
+    }
+
+    private void triggerSync(String mode, boolean silent) {
+        app.ioExecutor.execute(() -> app.repository.runSync(mode, silent, () -> uiHandler.post(
+                silent ? this::refreshSilentlyAfterBackgroundSync : this::refreshVisibleTabAfterSync)));
+    }
+
+    private void refreshSilentlyAfterBackgroundSync() {
+        app.ioExecutor.execute(() -> {
+            Models.LibraryStats st = app.repository.db.getLibraryStats(false);
+            uiHandler.post(() -> {
+                latestStats = st;
+                updateSyncChipCount();
+                if (currentTab == 0) loadHome(false);
+                else if (currentTab == 5) loadServersTab(false);
+            });
+        });
     }
 
     private void refreshVisibleTabAfterSync() {
@@ -1146,7 +1166,7 @@ public final class MainActivity extends AppCompatActivity {
                 .setPositiveButton("Update Now", null)
                 .create();
         dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
-                UiHelper.openExternalBrowser(this, info.downloadUrl, true)));
+                UiHelper.downloadAppUpdateDirect(this, info)));
         dlg.show();
     }
 
@@ -1157,14 +1177,14 @@ public final class MainActivity extends AppCompatActivity {
         msg.append(info.changelog);
         if (info.apkSizeBytes > 0) msg.append("\n\nAPK Size: ").append(Models.formatBytes(info.apkSizeBytes));
         if (info.sha256 != null && !info.sha256.isEmpty()) msg.append("\nSHA-256: ").append(info.sha256);
-        msg.append("\n\nDownloads the latest verified CineVault package in your browser.");
+        msg.append("\n\nDownloads CineVault directly to your Downloads folder.");
 
         new AlertDialog.Builder(this)
                 .setTitle("CineVault " + info.displayVersion + " Available")
                 .setMessage(msg.toString())
                 .setNegativeButton("Later", null)
                 .setPositiveButton("Download Update", (d, w) ->
-                        UiHelper.openExternalBrowser(this, info.downloadUrl, true))
+                        UiHelper.downloadAppUpdateDirect(this, info))
                 .show();
     }
 

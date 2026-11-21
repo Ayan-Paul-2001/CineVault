@@ -1,10 +1,13 @@
 package com.cinevault.app.ui;
 
+import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
 import android.util.TypedValue;
 import android.view.View;
 import android.widget.ImageView;
@@ -13,6 +16,7 @@ import android.widget.Toast;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.model.GlideUrl;
 import com.bumptech.glide.load.model.LazyHeaders;
+import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 
 import java.util.Locale;
@@ -93,6 +97,51 @@ public final class UiHelper {
                 .load(model)
                 .centerCrop()
                 .into(target);
+    }
+
+    /**
+     * Downloads the verified HTTPS update APK directly via Android's system DownloadManager
+     * without opening a browser or exposing the source repository URL.
+     */
+    public static long downloadAppUpdateDirect(Context ctx, Models.AppUpdateInfo info) {
+        if (info == null || info.downloadUrl == null || !ServerConfig.isTrustedUpdateUrl(info.downloadUrl)) {
+            Toast.makeText(ctx, "Update package is unavailable right now.", Toast.LENGTH_SHORT).show();
+            return -1L;
+        }
+        try {
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) {
+                Toast.makeText(ctx, "System download service unavailable.", Toast.LENGTH_SHORT).show();
+                return -1L;
+            }
+            String safeVer = info.displayVersion != null
+                    ? info.displayVersion.replaceAll("[^A-Za-z0-9._-]", "")
+                    : "latest";
+            String fileName = "CineVault-" + safeVer + ".apk";
+
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(info.downloadUrl.trim()));
+            req.setTitle("CineVault " + info.displayVersion);
+            req.setDescription("Downloading CineVault update...");
+            req.setMimeType("application/vnd.android.package-archive");
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setAllowedOverMetered(true);
+            req.setAllowedOverRoaming(true);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+            } else {
+                req.setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName);
+            }
+
+            long id = dm.enqueue(req);
+            Toast.makeText(ctx,
+                    "Downloading CineVault " + info.displayVersion + " — tap the notification when finished to install.",
+                    Toast.LENGTH_LONG).show();
+            return id;
+        } catch (Exception e) {
+            Toast.makeText(ctx, "Failed to start update download. Please check your connection.", Toast.LENGTH_LONG).show();
+            return -1L;
+        }
     }
 
     public static void openExternalBrowser(Context ctx, String url, boolean updateOnly) {

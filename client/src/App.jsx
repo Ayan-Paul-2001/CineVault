@@ -123,15 +123,12 @@ export default function App() {
             d.stats.total > 0 &&
             (lastReloadTotalRef.current === 0 ||
               d.stats.total - lastReloadTotalRef.current >= 500 ||
-              isDone)
+              (isDone && d.sync?.newlyAddedCount > 0))
           ) {
             lastReloadTotalRef.current = d.stats.total;
             loadHome();
             loadCategories();
           }
-        }
-        if (isDone && d.sync?.newlyAddedCount > 0) {
-          notify(`Synced ${d.sync.newlyAddedCount.toLocaleString()} new titles across all servers!`);
         }
       } catch {}
     };

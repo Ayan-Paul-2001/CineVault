@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import path from "node:path";
 import { ICC_ORIGIN, DEFAULT_ICC_SESSION } from "./config.js";
 import { getSyncState, setSyncState } from "./db.js";
@@ -30,7 +31,11 @@ function withIccSlot(fn) {
 }
 
 export function getIccSession() {
-  return getSyncState("icc_session") || DEFAULT_ICC_SESSION;
+  let saved = getSyncState("icc_device_session");
+  if (saved && saved.trim().length >= 16) return saved.trim();
+  saved = crypto.randomBytes(16).toString("hex");
+  setSyncState("icc_device_session", saved);
+  return saved;
 }
 
 /**

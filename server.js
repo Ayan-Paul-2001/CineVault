@@ -59,7 +59,8 @@ function sendJson(res, data, status = 200) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
-    "Cache-Control": "no-cache",
+    "Cache-Control": "private, no-store",
+    Vary: "X-CineVault-Device-Id",
   });
   res.end(body);
 }

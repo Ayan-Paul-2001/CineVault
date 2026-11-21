@@ -5,13 +5,17 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import com.cinevault.app.data.IccService;
 import com.cinevault.app.data.MediaParser;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 import com.cinevault.app.data.UpdateService;
 
+import okhttp3.OkHttpClient;
 import org.json.JSONObject;
 import org.junit.Test;
+
+import java.util.List;
 
 public class CineVaultUnitTest {
     @Test
@@ -120,5 +124,20 @@ public class CineVaultUnitTest {
         assertFalse(
                 ServerConfig.isTrustedUpdateUrl("http://github.com/user/repo/raw/main/public%20release/CineVault.apk"));
         assertFalse(ServerConfig.isTrustedUpdateUrl("https://untrusted.example.org/app.apk"));
+    }
+
+    @Test
+    public void iccServiceParsesCardsAndSanitizesPosters() {
+        IccService icc = new IccService(new OkHttpClient());
+        String html = "<div class=\"news-content\">"
+                + "<div class=\"post\" data-publish-date=\"15.11.2026\">"
+                + "<a href=\"player.php?play=998877\"><img src=\"files/Poster [4K] 2026.jpg\"></a>"
+                + "<div class=\"title\">Dune Part Two (2024) 2160p</div>"
+                + "</div></div>";
+        List<IccService.IccCard> cards = icc.parseCardsHtml(html);
+        assertEquals(1, cards.size());
+        assertEquals("998877", cards.get(0).playId);
+        assertEquals("http://10.16.100.244/player.php?play=998877", cards.get(0).url);
+        assertEquals("http://10.16.100.244/files/Poster%20%5B4K%5D%202026.jpg", cards.get(0).posterUrl);
     }
 }

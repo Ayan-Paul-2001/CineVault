@@ -3,6 +3,7 @@ package com.cinevault.app.ui;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.media.AudioManager;
 import android.media.audiofx.LoudnessEnhancer;
 import android.net.Uri;
@@ -12,8 +13,10 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
@@ -39,6 +42,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
+import androidx.media3.common.VideoSize;
 import androidx.media3.common.text.Cue;
 import androidx.media3.common.text.CueGroup;
 import androidx.media3.common.util.UnstableApi;
@@ -46,6 +50,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
 import com.cinevault.app.CineVaultApp;
@@ -60,9 +65,11 @@ import java.util.Locale;
 /**
  * Fullscreen Cinema Video Player powered by AndroidX Media3 ExoPlayer + Jellyfin FFmpeg Audio Decoder.
  * Supports hardware H.264/HEVC/10-bit video, Dolby AC3/EAC3/DTS audio, Dual/Multi-Audio switching,
- * VLC-style left-side brightness slider and right-side volume + 200% sound boost slider,
- * automatic non-forced-first subtitle selection, subtitle size & timing offset, quality switcher,
- * Next Episode auto-advance, and persistent SQLite watch history resume.
+ * VLC-style left-side brightness slider, right-side volume + 200% sound boost slider,
+ * VLC-style video size / aspect-ratio fixing (Best Fit, Fit Screen Crop, Fill Stretch, 16:9, 4:3,
+ * 21:9, Fit Horizontal, Fit Vertical + 2-finger pinch-to-zoom), automatic non-forced-first subtitle
+ * selection, subtitle size & timing offset, quality switcher, Next Episode auto-advance, and
+ * persistent SQLite watch history resume.
  */
 @OptIn(markerClass = UnstableApi.class)
 public final class PlayerActivity extends AppCompatActivity {
@@ -72,19 +79,48 @@ public final class PlayerActivity extends AppCompatActivity {
     private static final int GESTURE_BRIGHTNESS = 1;
     private static final int GESTURE_VOLUME = 2;
 
+    private static final class VideoScaleMode {
+        final String key;
+        final String label;
+        final String shortLabel;
+        final int resizeMode;
+        final float forcedAspectRatio;
+
+        VideoScaleMode(String key, String label, String shortLabel, int resizeMode, float forcedAspectRatio) {
+            this.key = key;
+            this.label = label;
+            this.shortLabel = shortLabel;
+            this.resizeMode = resizeMode;
+            this.forcedAspectRatio = forcedAspectRatio;
+        }
+    }
+
+    private static final VideoScaleMode[] SCALE_MODES = new VideoScaleMode[]{
+            new VideoScaleMode("fit", "Best Fit", "Fit", AspectRatioFrameLayout.RESIZE_MODE_FIT, 0f),
+            new VideoScaleMode("crop", "Fit Screen (Crop)", "Crop", AspectRatioFrameLayout.RESIZE_MODE_ZOOM, 0f),
+            new VideoScaleMode("fill", "Fill (Stretch)", "Fill", AspectRatioFrameLayout.RESIZE_MODE_FILL, 0f),
+            new VideoScaleMode("16_9", "16:9 Cinema", "16:9", AspectRatioFrameLayout.RESIZE_MODE_FIT, 16f / 9f),
+            new VideoScaleMode("4_3", "4:3 Classic", "4:3", AspectRatioFrameLayout.RESIZE_MODE_FIT, 4f / 3f),
+            new VideoScaleMode("21_9", "21:9 Ultrawide", "21:9", AspectRatioFrameLayout.RESIZE_MODE_FIT, 21f / 9f),
+            new VideoScaleMode("width", "Fit Horizontal", "Width", AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH, 0f),
+            new VideoScaleMode("height", "Fit Vertical", "Height", AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT, 0f)
+    };
+
     private CineVaultApp app;
     private Models.PlaybackSession session;
     private ExoPlayer player;
     private PlayerView playerView;
     private AudioManager audioManager;
     private LoudnessEnhancer loudnessEnhancer;
+    private ScaleGestureDetector scaleGestureDetector;
 
     private View gestureLayer, gestureHud, gestureBarTrack, gestureBarFill;
+    private View scaleHud;
     private ImageView gestureHudIcon;
-    private TextView gestureHudPercent, gestureHudLabel;
+    private TextView gestureHudPercent, gestureHudLabel, scaleHudTitle, scaleHudHint;
 
     private TextView cinemaSubText, titleView, subtitleView, posTimeView, durTimeView;
-    private TextView btnNextEp, btnAudio, btnCc, btnQuality, btnExternal;
+    private TextView btnNextEp, btnScale, btnAudio, btnCc, btnQuality, btnExternal;
     private ImageButton btnPlayPause;
     private SeekBar seekBar;
     private View bufferingView, controlsOverlay;
@@ -99,6 +135,13 @@ public final class PlayerActivity extends AppCompatActivity {
     private float subTextSp = 20f;
     private double subDelaySec = 0.0;
     private boolean subtitlesEnabled = true;
+
+    // VLC-style Video Size / Aspect Ratio state
+    private int scaleModeIndex = 0;
+    private float naturalVideoAspectRatio = 16f / 9f;
+    private boolean pinchActive = false;
+    private boolean pinchTriggered = false;
+    private float pinchSpanFactor = 1.0f;
 
     // VLC-style Brightness & Volume Boost gesture state
     private int touchSlop;
@@ -122,6 +165,15 @@ public final class PlayerActivity extends AppCompatActivity {
             gestureHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
                 gestureHud.setVisibility(View.GONE);
                 gestureHud.setAlpha(1f);
+            }).start();
+        }
+    };
+
+    private final Runnable hideScaleHudTask = () -> {
+        if (scaleHud != null && scaleHud.getVisibility() == View.VISIBLE) {
+            scaleHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
+                scaleHud.setVisibility(View.GONE);
+                scaleHud.setAlpha(1f);
             }).start();
         }
     };
@@ -177,9 +229,17 @@ public final class PlayerActivity extends AppCompatActivity {
         enterImmersive();
         bindViews();
         initPlayer();
+        loadSavedScaleMode();
         openCurrentSession();
         handler.post(progressPollTask);
         scheduleHideControls();
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        isLandscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE;
+        handler.post(() -> applyVideoScaleMode(false, false));
     }
 
     private void enterImmersive() {
@@ -199,6 +259,9 @@ public final class PlayerActivity extends AppCompatActivity {
         gestureHudIcon = findViewById(R.id.gesture_hud_icon);
         gestureHudPercent = findViewById(R.id.gesture_hud_percent);
         gestureHudLabel = findViewById(R.id.gesture_hud_label);
+        scaleHud = findViewById(R.id.player_scale_hud);
+        scaleHudTitle = findViewById(R.id.scale_hud_title);
+        scaleHudHint = findViewById(R.id.scale_hud_hint);
 
         cinemaSubText = findViewById(R.id.cinema_subtitle_text);
         bufferingView = findViewById(R.id.player_buffering);
@@ -210,6 +273,7 @@ public final class PlayerActivity extends AppCompatActivity {
         seekBar = findViewById(R.id.player_seekbar);
         btnPlayPause = findViewById(R.id.btn_player_play_pause);
         btnNextEp = findViewById(R.id.btn_player_next_ep);
+        btnScale = findViewById(R.id.btn_player_scale);
         btnAudio = findViewById(R.id.btn_player_audio);
         btnCc = findViewById(R.id.btn_player_cc);
         btnQuality = findViewById(R.id.btn_player_quality);
@@ -218,6 +282,30 @@ public final class PlayerActivity extends AppCompatActivity {
         if (playerView.getSubtitleView() != null) {
             playerView.getSubtitleView().setVisibility(View.GONE);
         }
+
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScaleBegin(@NonNull ScaleGestureDetector detector) {
+                pinchSpanFactor = 1.0f;
+                pinchTriggered = false;
+                return true;
+            }
+
+            @Override
+            public boolean onScale(@NonNull ScaleGestureDetector detector) {
+                pinchSpanFactor *= detector.getScaleFactor();
+                if (!pinchTriggered) {
+                    if (pinchSpanFactor >= 1.14f) {
+                        pinchTriggered = true;
+                        setVideoScaleMode(1, true); // Fit Screen (Crop)
+                    } else if (pinchSpanFactor <= 0.86f) {
+                        pinchTriggered = true;
+                        setVideoScaleMode(0, true); // Best Fit
+                    }
+                }
+                return true;
+            }
+        });
 
         gestureLayer.setOnTouchListener(this::handleGestureTouch);
 
@@ -243,6 +331,14 @@ public final class PlayerActivity extends AppCompatActivity {
         });
 
         btnNextEp.setOnClickListener(v -> switchEpisode(session.playlistIndex + 1));
+        btnScale.setOnClickListener(v -> {
+            setVideoScaleMode((scaleModeIndex + 1) % SCALE_MODES.length, true);
+            scheduleHideControls();
+        });
+        btnScale.setOnLongClickListener(v -> {
+            showScaleModeDialog();
+            return true;
+        });
         btnAudio.setOnClickListener(v -> showAudioDialog());
         btnCc.setOnClickListener(v -> showSubtitleDialog());
         btnQuality.setOnClickListener(v -> showQualityDialog());
@@ -265,9 +361,31 @@ public final class PlayerActivity extends AppCompatActivity {
     }
 
     private boolean handleGestureTouch(View v, MotionEvent event) {
+        if (scaleGestureDetector != null) {
+            scaleGestureDetector.onTouchEvent(event);
+        }
         int action = event.getActionMasked();
         int width = Math.max(1, v.getWidth());
         int height = Math.max(1, v.getHeight());
+
+        if (action == MotionEvent.ACTION_POINTER_DOWN || event.getPointerCount() >= 2) {
+            pinchActive = true;
+            if (gestureMode != GESTURE_NONE) {
+                gestureMode = GESTURE_NONE;
+                handler.removeCallbacks(hideGestureHudTask);
+                gestureHud.setVisibility(View.GONE);
+            }
+            return true;
+        }
+
+        if (pinchActive) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                pinchActive = false;
+                pinchTriggered = false;
+                gestureMode = GESTURE_NONE;
+            }
+            return true;
+        }
 
         if (action == MotionEvent.ACTION_DOWN) {
             gestureMode = GESTURE_NONE;
@@ -430,6 +548,111 @@ public final class PlayerActivity extends AppCompatActivity {
         gestureBarFill.setBackgroundColor(barColor);
     }
 
+    private void loadSavedScaleMode() {
+        app.ioExecutor.execute(() -> {
+            String savedKey = app.repository.db.getSyncState("player_scale_mode");
+            int idx = 0;
+            if (savedKey != null && !savedKey.isEmpty()) {
+                for (int i = 0; i < SCALE_MODES.length; i++) {
+                    if (SCALE_MODES[i].key.equals(savedKey)) {
+                        idx = i;
+                        break;
+                    }
+                }
+            }
+            int finalIdx = idx;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                scaleModeIndex = finalIdx;
+                applyVideoScaleMode(false, false);
+            });
+        });
+    }
+
+    private void setVideoScaleMode(int index, boolean showHud) {
+        int safe = ((index % SCALE_MODES.length) + SCALE_MODES.length) % SCALE_MODES.length;
+        scaleModeIndex = safe;
+        applyVideoScaleMode(showHud, true);
+    }
+
+    private void applyVideoScaleMode(boolean showHud, boolean persist) {
+        if (playerView == null) return;
+        VideoScaleMode mode = SCALE_MODES[scaleModeIndex];
+        playerView.setResizeMode(mode.resizeMode);
+
+        AspectRatioFrameLayout contentFrame = findAspectRatioFrameLayout();
+        if (contentFrame != null) {
+            contentFrame.setResizeMode(mode.resizeMode);
+            if (mode.forcedAspectRatio > 0f) {
+                contentFrame.setAspectRatio(mode.forcedAspectRatio);
+            } else if (naturalVideoAspectRatio > 0f) {
+                contentFrame.setAspectRatio(naturalVideoAspectRatio);
+            }
+            contentFrame.requestLayout();
+        }
+
+        if (btnScale != null) {
+            btnScale.setText(mode.shortLabel);
+            btnScale.setTextColor(scaleModeIndex == 0 ? 0xFFFFFFFF : 0xFFFCA5A5);
+        }
+
+        if (persist) {
+            String key = mode.key;
+            app.ioExecutor.execute(() -> app.repository.db.setSyncState("player_scale_mode", key));
+        }
+        if (showHud) {
+            showScaleHud(mode);
+        }
+    }
+
+    private void showScaleHud(VideoScaleMode mode) {
+        if (scaleHud == null) return;
+        handler.removeCallbacks(hideScaleHudTask);
+        scaleHud.animate().cancel();
+        scaleHud.setAlpha(1f);
+        scaleHudTitle.setText(mode.label);
+        scaleHudHint.setText("Tap Fit to cycle · Long-press for all · Pinch to zoom");
+        scaleHud.setVisibility(View.VISIBLE);
+        handler.postDelayed(hideScaleHudTask, 1200);
+    }
+
+    private void showScaleModeDialog() {
+        String[] labels = new String[SCALE_MODES.length];
+        for (int i = 0; i < SCALE_MODES.length; i++) {
+            labels[i] = SCALE_MODES[i].label;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Video Size / Aspect Ratio")
+                .setSingleChoiceItems(labels, scaleModeIndex, (d, which) -> {
+                    d.dismiss();
+                    setVideoScaleMode(which, true);
+                    scheduleHideControls();
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private AspectRatioFrameLayout findAspectRatioFrameLayout() {
+        if (playerView == null) return null;
+        View direct = playerView.findViewById(androidx.media3.ui.R.id.exo_content_frame);
+        if (direct instanceof AspectRatioFrameLayout) {
+            return (AspectRatioFrameLayout) direct;
+        }
+        return findAspectRatioRecursive(playerView);
+    }
+
+    private AspectRatioFrameLayout findAspectRatioRecursive(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View c = group.getChildAt(i);
+            if (c instanceof AspectRatioFrameLayout) return (AspectRatioFrameLayout) c;
+            if (c instanceof ViewGroup) {
+                AspectRatioFrameLayout found = findAspectRatioRecursive((ViewGroup) c);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
     private void initPlayer() {
         DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON);
@@ -441,6 +664,22 @@ public final class PlayerActivity extends AppCompatActivity {
             @Override
             public void onAudioSessionIdChanged(int audioSessionId) {
                 attachLoudnessEnhancer(audioSessionId);
+            }
+
+            @Override
+            public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    float ratio = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height;
+                    if (ratio > 0.1f && ratio < 10f) {
+                        naturalVideoAspectRatio = ratio;
+                    }
+                    handler.post(() -> applyVideoScaleMode(false, false));
+                }
+            }
+
+            @Override
+            public void onRenderedFirstFrame() {
+                handler.post(() -> applyVideoScaleMode(false, false));
             }
 
             @Override

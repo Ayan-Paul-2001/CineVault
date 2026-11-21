@@ -1,12 +1,15 @@
 package com.cinevault.app.ui;
 
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
@@ -19,6 +22,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
@@ -87,8 +91,9 @@ public final class MainActivity extends AppCompatActivity {
     private String confirmClearTarget = null;
     private String lastLiveIccSearchQuery = "";
 
-    // Top bar & 3-second update popup
-    private View topAppBar;
+    // Top bar, TV/Tablet top nav & 3-second update popup
+    private View topAppBar, topBarInner, tvTabletNavBar;
+    private TextView topNavHome, topNavMovies, topNavSeries, topNavMyList, topNavServers;
     private View brandContainer;
     private EditText searchInput;
     private ImageButton btnSearchToggle;
@@ -98,16 +103,18 @@ public final class MainActivity extends AppCompatActivity {
     private View updateBanner;
     private TextView updateBannerText, updateBannerSub;
 
-    // Tab views
+    // Tab views & responsive containers
     private SwipeRefreshLayout homeSwipe;
-    private View browseContainer;
-    private View myListContainer;
-    private View serversContainer;
+    private View browseContainer, browseHeaderBox;
+    private View myListContainer, myListContentInner;
+    private View serversContainer, serversContentInner;
     private BottomNavigationView bottomNav;
+    private RecyclerView browseRv, wlRv;
+    private boolean initialTvFocusRequested = false;
 
     // Home widgets
     private View homeEmptyBox;
-    private View heroContainer;
+    private View heroContainer, heroContentBox, heroActionsRow;
     private ImageView heroBackdrop;
     private TextView heroKicker, heroTitle, heroMeta;
     private MaterialButton btnHeroPlay, btnHeroDetails, btnHeroWatchlist;
@@ -245,6 +252,30 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyResponsiveFormFactorUi();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            int code = event.getKeyCode();
+            if (code == KeyEvent.KEYCODE_SEARCH) {
+                if (!searchOpen) btnSearchToggle.performClick();
+                else searchInput.requestFocus();
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MENU) {
+                if (currentTab == 5) switchTab(0, "", "", "recent");
+                else switchTab(5, "", "", "recent");
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         if (currentTab == 0) loadHome(false);
@@ -262,6 +293,13 @@ public final class MainActivity extends AppCompatActivity {
 
     private void bindViews() {
         topAppBar = findViewById(R.id.top_app_bar);
+        topBarInner = findViewById(R.id.top_bar_inner);
+        tvTabletNavBar = findViewById(R.id.tv_tablet_nav_bar);
+        topNavHome = findViewById(R.id.top_nav_home);
+        topNavMovies = findViewById(R.id.top_nav_movies);
+        topNavSeries = findViewById(R.id.top_nav_series);
+        topNavMyList = findViewById(R.id.top_nav_mylist);
+        topNavServers = findViewById(R.id.top_nav_servers);
         brandContainer = findViewById(R.id.brand_container);
         searchInput = findViewById(R.id.search_input);
         btnSearchToggle = findViewById(R.id.btn_search_toggle);
@@ -274,12 +312,17 @@ public final class MainActivity extends AppCompatActivity {
 
         homeSwipe = findViewById(R.id.home_swipe);
         browseContainer = findViewById(R.id.browse_container);
+        browseHeaderBox = findViewById(R.id.browse_header_box);
         myListContainer = findViewById(R.id.mylist_container);
+        myListContentInner = findViewById(R.id.mylist_content_inner);
         serversContainer = findViewById(R.id.servers_container);
+        serversContentInner = findViewById(R.id.servers_content_inner);
         bottomNav = findViewById(R.id.bottom_nav);
 
         homeEmptyBox = findViewById(R.id.home_empty_box);
         heroContainer = findViewById(R.id.hero_container);
+        heroContentBox = findViewById(R.id.hero_content_box);
+        heroActionsRow = findViewById(R.id.hero_actions_row);
         heroBackdrop = findViewById(R.id.hero_backdrop);
         heroKicker = findViewById(R.id.hero_kicker);
         heroTitle = findViewById(R.id.hero_title);
@@ -321,7 +364,7 @@ public final class MainActivity extends AppCompatActivity {
         pageIndicator = findViewById(R.id.page_indicator);
 
         int gridCols = computeGridColumns();
-        RecyclerView browseRv = findViewById(R.id.browse_recycler);
+        browseRv = findViewById(R.id.browse_recycler);
         browseRv.setLayoutManager(new GridLayoutManager(this, gridCols));
         browseAdapter = new MediaCardAdapter(true, false, item -> openDetail(item, false), null);
         browseRv.setAdapter(browseAdapter);
@@ -338,7 +381,7 @@ public final class MainActivity extends AppCompatActivity {
         myListHistoryAdapter = new MediaCardAdapter(false, true, this::resumeFromHistory, this::removeHistoryItem);
         histRv.setAdapter(myListHistoryAdapter);
 
-        RecyclerView wlRv = findViewById(R.id.mylist_wl_recycler);
+        wlRv = findViewById(R.id.mylist_wl_recycler);
         wlRv.setLayoutManager(new GridLayoutManager(this, gridCols));
         myListWlAdapter = new MediaCardAdapter(true, false, item -> openDetail(item, false), this::removeWatchlistItem);
         wlRv.setAdapter(myListWlAdapter);
@@ -366,11 +409,132 @@ public final class MainActivity extends AppCompatActivity {
         srvAppVersion.setText("V" + app.repository.updateService.getInstalledVersion()
                 + " (Code " + app.repository.updateService.getInstalledVersionCode() + ")");
         setSpinnerItems(spinAutoSyncInterval, Arrays.asList(AUTO_SYNC_INTERVAL_LABELS));
+
+        // TV & keyboard D-Pad focus highlights on key controls
+        UiHelper.applyTvFocusEffect(btnHeroPlay, 1.05f);
+        UiHelper.applyTvFocusEffect(btnHeroDetails, 1.05f);
+        UiHelper.applyTvFocusEffect(btnHeroWatchlist, 1.06f);
+        UiHelper.applyTvFocusEffect(findViewById(R.id.btn_home_sync_now), 1.05f);
+        UiHelper.applyTvFocusEffect(btnPrevPage, 1.05f);
+        UiHelper.applyTvFocusEffect(btnNextPage, 1.05f);
+        UiHelper.applyTvFocusEffect(btnClearHistory, 1.05f);
+        UiHelper.applyTvFocusEffect(btnClearWatchlist, 1.05f);
+        UiHelper.applyTvFocusEffect(btnSrvSyncQuick, 1.04f);
+        UiHelper.applyTvFocusEffect(btnSrvSyncFull, 1.04f);
+        UiHelper.applyTvFocusEffect(btnSrvPingAll, 1.05f);
+        UiHelper.applyTvFocusEffect(btnSrvCheckUpdates, 1.03f);
+        UiHelper.applyTvFocusEffect(btnSrvDownloadUpdate, 1.03f);
+        UiHelper.applyTvFocusEffect(topNavHome, 1.06f);
+        UiHelper.applyTvFocusEffect(topNavMovies, 1.06f);
+        UiHelper.applyTvFocusEffect(topNavSeries, 1.06f);
+        UiHelper.applyTvFocusEffect(topNavMyList, 1.06f);
+        UiHelper.applyTvFocusEffect(topNavServers, 1.06f);
+
+        applyResponsiveFormFactorUi();
+    }
+
+    private void applyResponsiveFormFactorUi() {
+        boolean tv = UiHelper.isAndroidTv(this);
+        boolean tablet = UiHelper.isTablet(this);
+        boolean useTopNav = UiHelper.useTopNavLayout(this);
+        float widthDp = UiHelper.screenWidthDp(this);
+
+        if (tvTabletNavBar != null) {
+            tvTabletNavBar.setVisibility((useTopNav && !searchOpen) ? View.VISIBLE : View.GONE);
+        }
+        if (bottomNav != null) {
+            bottomNav.setVisibility(useTopNav ? View.GONE : View.VISIBLE);
+        }
+
+        if (topBarInner != null) {
+            ViewGroup.LayoutParams tlp = topBarInner.getLayoutParams();
+            tlp.height = UiHelper.dp(this, tv ? 64 : (tablet ? 60 : 56));
+            topBarInner.setLayoutParams(tlp);
+            int topHPad = UiHelper.dp(this, tv ? 28 : (tablet ? 20 : 12));
+            topBarInner.setPadding(topHPad, 0, topHPad, 0);
+        }
+
+        if (heroContainer != null) {
+            ViewGroup.LayoutParams hlp = heroContainer.getLayoutParams();
+            hlp.height = UiHelper.dp(this, tv ? 420 : (widthDp >= 720f ? 375 : (tablet ? 345 : 305)));
+            heroContainer.setLayoutParams(hlp);
+        }
+        if (heroContentBox != null) {
+            int hp = UiHelper.dp(this, tv ? 28 : (tablet ? 24 : 16));
+            int vp = UiHelper.dp(this, tv ? 22 : (tablet ? 18 : 16));
+            heroContentBox.setPadding(hp, vp, hp, vp);
+        }
+        if (heroTitle != null) {
+            heroTitle.setTextSize(tv ? 32f : (tablet ? 28f : 24f));
+        }
+        if (heroMeta != null) {
+            heroMeta.setTextSize(tv ? 14f : (tablet ? 13f : 12f));
+        }
+        if (heroActionsRow != null) {
+            ViewGroup.LayoutParams alp = heroActionsRow.getLayoutParams();
+            alp.width = (tv || widthDp >= 600f) ? UiHelper.dp(this, 440) : ViewGroup.LayoutParams.MATCH_PARENT;
+            heroActionsRow.setLayoutParams(alp);
+        }
+
+        int gridCols = computeGridColumns();
+        if (browseRv != null && browseRv.getLayoutManager() instanceof GridLayoutManager) {
+            ((GridLayoutManager) browseRv.getLayoutManager()).setSpanCount(gridCols);
+            int bPad = UiHelper.dp(this, tv ? 24 : (tablet ? 18 : 12));
+            browseRv.setPadding(bPad, browseRv.getPaddingTop(), bPad, browseRv.getPaddingBottom());
+        }
+        if (wlRv != null && wlRv.getLayoutManager() instanceof GridLayoutManager) {
+            ((GridLayoutManager) wlRv.getLayoutManager()).setSpanCount(gridCols);
+        }
+
+        int basePad = UiHelper.dp(this, tv ? 28 : (tablet ? 22 : 16));
+        if (browseHeaderBox != null) {
+            browseHeaderBox.setPadding(basePad, UiHelper.dp(this, 12), basePad, UiHelper.dp(this, 8));
+        }
+
+        int centeredSidePad = basePad;
+        if (widthDp >= 900f) {
+            centeredSidePad = Math.max(basePad, UiHelper.dp(this, (int) ((widthDp - 840f) / 2f)));
+        }
+        if (serversContentInner != null) {
+            serversContentInner.setPadding(centeredSidePad, UiHelper.dp(this, 18), centeredSidePad, UiHelper.dp(this, 32));
+        }
+        if (myListContentInner != null) {
+            myListContentInner.setPadding(basePad, UiHelper.dp(this, 18), basePad, UiHelper.dp(this, 28));
+        }
+
+        if (cwSection != null) {
+            RecyclerView cwRv = findViewById(R.id.cw_recycler);
+            if (cwRv != null && (tv || tablet)) {
+                int cPad = UiHelper.dp(this, tv ? 24 : 20);
+                cwRv.setPadding(cPad, cwRv.getPaddingTop(), cPad, cwRv.getPaddingBottom());
+            }
+        }
+
+        updateTopNavStyles();
+    }
+
+    private void updateTopNavStyles() {
+        if (topNavHome == null) return;
+        styleTopNavItem(topNavHome, currentTab == 0);
+        styleTopNavItem(topNavMovies, currentTab == 1);
+        styleTopNavItem(topNavSeries, currentTab == 2);
+        styleTopNavItem(topNavMyList, currentTab == 3);
+        styleTopNavItem(topNavServers, currentTab == 5);
+    }
+
+    private void styleTopNavItem(TextView tv, boolean active) {
+        tv.setTextColor(active ? 0xFFE50914 : 0xFFCBD5E1);
     }
 
     private int computeGridColumns() {
-        float widthDp = getResources().getDisplayMetrics().widthPixels / getResources().getDisplayMetrics().density;
-        return Math.max(2, Math.min(7, (int) (widthDp / 140f)));
+        float widthDp = UiHelper.screenWidthDp(this);
+        if (UiHelper.isAndroidTv(this)) {
+            return Math.max(4, Math.min(7, (int) ((widthDp - 56f) / 172f)));
+        }
+        if (UiHelper.isTablet(this)) {
+            return Math.max(3, Math.min(6, (int) ((widthDp - 36f) / 156f)));
+        }
+        return Math.max(2, Math.min(4, (int) (widthDp / 140f)));
     }
 
     private void setupListeners() {
@@ -394,6 +558,9 @@ public final class MainActivity extends AppCompatActivity {
         btnSearchToggle.setOnClickListener(v -> {
             searchOpen = !searchOpen;
             brandContainer.setVisibility(searchOpen ? View.GONE : View.VISIBLE);
+            if (tvTabletNavBar != null) {
+                tvTabletNavBar.setVisibility((!searchOpen && UiHelper.useTopNavLayout(this)) ? View.VISIBLE : View.GONE);
+            }
             searchInput.setVisibility(searchOpen ? View.VISIBLE : View.GONE);
             btnSearchToggle.setImageResource(searchOpen ? R.drawable.ic_close : R.drawable.ic_search);
             if (searchOpen) {
@@ -403,6 +570,12 @@ public final class MainActivity extends AppCompatActivity {
                 if (currentTab == 4) switchTab(0, "", "", "recent");
             }
         });
+
+        topNavHome.setOnClickListener(v -> { if (searchOpen) btnSearchToggle.performClick(); switchTab(0, "", "", "recent"); });
+        topNavMovies.setOnClickListener(v -> { if (searchOpen) btnSearchToggle.performClick(); switchTab(1, "", "", "recent"); });
+        topNavSeries.setOnClickListener(v -> { if (searchOpen) btnSearchToggle.performClick(); switchTab(2, "", "", "recent"); });
+        topNavMyList.setOnClickListener(v -> { if (searchOpen) btnSearchToggle.performClick(); switchTab(3, "", "", "recent"); });
+        topNavServers.setOnClickListener(v -> { if (searchOpen) btnSearchToggle.performClick(); switchTab(5, "", "", "recent"); });
 
         searchInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -709,6 +882,7 @@ public final class MainActivity extends AppCompatActivity {
             populateFilterControls();
             loadBrowse();
         });
+        UiHelper.applyTvFocusEffect(chip, 1.05f);
         filterCategoryChips.addView(chip);
     }
 
@@ -725,6 +899,7 @@ public final class MainActivity extends AppCompatActivity {
         }
         lastHomeBackPressMs = 0L;
         currentTab = tabIndex;
+        updateTopNavStyles();
         if (tabIndex == 0) {
             bottomNav.getMenu().findItem(R.id.nav_home).setChecked(true);
             showActiveTabView();
@@ -775,6 +950,16 @@ public final class MainActivity extends AppCompatActivity {
                 cwAdapter.submitList(feed.continueWatching);
                 homeSectionsAdapter.submitList(feed.sections);
 
+                if (UiHelper.isAndroidTv(MainActivity.this) && !initialTvFocusRequested && currentTab == 0) {
+                    initialTvFocusRequested = true;
+                    if (!feed.hero.isEmpty() && btnHeroPlay != null) {
+                        btnHeroPlay.post(() -> btnHeroPlay.requestFocus());
+                    } else if (empty) {
+                        View syncBtn = findViewById(R.id.btn_home_sync_now);
+                        if (syncBtn != null) syncBtn.post(syncBtn::requestFocus);
+                    }
+                }
+
                 if (initialBootstrap) {
                     int iccCount = feed.stats.bySource.containsKey("icc") ? feed.stats.bySource.get("icc") : 0;
                     if (feed.stats.total == 0) {
@@ -822,6 +1007,7 @@ public final class MainActivity extends AppCompatActivity {
                     UiHelper.dp(this, isActive ? 24 : 12), UiHelper.dp(this, 4));
             lp.setMargins(UiHelper.dp(this, 3), 0, UiHelper.dp(this, 3), 0);
             dot.setLayoutParams(lp);
+            dot.setFocusable(false);
             dot.setBackgroundColor(isActive ? 0xFFE50914 : 0x44FFFFFF);
             dot.setOnClickListener(v -> { heroIndex = idx; renderHero(); });
             heroDots.addView(dot);

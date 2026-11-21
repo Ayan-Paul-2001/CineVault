@@ -4,15 +4,18 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -58,6 +61,7 @@ public final class DetailActivity extends AppCompatActivity {
     private TextView toolbarTitle, detailTitle, detailPills, detailGenres, detailOverview, detailCredits, qualitiesHeading;
     private ImageView detailPoster;
     private View loadingBox, scrollView, qualitiesSection, seasonsSection;
+    private View detailHeaderContainer, detailActionsRow;
     private MaterialButton btnPlayBest, btnWatchlist;
     private ChipGroup qualityFilterChips, seriesEditionChips, seasonChips;
     private LinearLayout qualitiesList, episodesList;
@@ -88,6 +92,8 @@ public final class DetailActivity extends AppCompatActivity {
         detailCredits = findViewById(R.id.detail_credits);
         loadingBox = findViewById(R.id.detail_loading_box);
         scrollView = findViewById(R.id.detail_scroll);
+        detailHeaderContainer = findViewById(R.id.detail_header_container);
+        detailActionsRow = findViewById(R.id.detail_actions_row);
         btnPlayBest = findViewById(R.id.btn_detail_play_best);
         btnWatchlist = findViewById(R.id.btn_detail_watchlist);
         qualitiesSection = findViewById(R.id.detail_qualities_section);
@@ -99,10 +105,56 @@ public final class DetailActivity extends AppCompatActivity {
         seasonChips = findViewById(R.id.detail_season_chips);
         episodesList = findViewById(R.id.detail_episodes_list);
 
+        UiHelper.applyTvFocusEffect(btnPlayBest, 1.04f);
+        UiHelper.applyTvFocusEffect(btnWatchlist, 1.04f);
+
         findViewById(R.id.btn_detail_back).setOnClickListener(v -> finish());
         findViewById(R.id.btn_detail_refresh).setOnClickListener(v -> loadDetail(true));
 
+        applyResponsiveFormFactorUi();
         loadDetail(false);
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyResponsiveFormFactorUi();
+    }
+
+    private void applyResponsiveFormFactorUi() {
+        boolean tv = UiHelper.isAndroidTv(this);
+        boolean tablet = UiHelper.isTablet(this);
+        float widthDp = UiHelper.screenWidthDp(this);
+
+        if (detailPoster != null) {
+            ViewGroup.LayoutParams plp = detailPoster.getLayoutParams();
+            plp.width = UiHelper.dp(this, tv ? 176 : (tablet ? 148 : 110));
+            plp.height = UiHelper.dp(this, tv ? 264 : (tablet ? 222 : 165));
+            detailPoster.setLayoutParams(plp);
+        }
+        if (detailTitle != null) detailTitle.setTextSize(tv ? 28f : (tablet ? 24f : 20f));
+        if (detailPills != null) detailPills.setTextSize(tv ? 14f : (tablet ? 13.5f : 12.5f));
+        if (detailOverview != null) detailOverview.setTextSize(tv ? 15.5f : (tablet ? 14.5f : 13.5f));
+        if (detailCredits != null) detailCredits.setTextSize(tv ? 13.5f : 12f);
+
+        if (detailActionsRow != null) {
+            ViewGroup.LayoutParams alp = detailActionsRow.getLayoutParams();
+            alp.width = (tv || widthDp >= 600f) ? UiHelper.dp(this, 440) : ViewGroup.LayoutParams.MATCH_PARENT;
+            detailActionsRow.setLayoutParams(alp);
+        }
+
+        int basePad = UiHelper.dp(this, tv ? 36 : (tablet ? 24 : 16));
+        int hPad = widthDp >= 960f ? Math.max(basePad, UiHelper.dp(this, (int) ((widthDp - 900f) / 2f))) : basePad;
+        if (detailHeaderContainer != null) {
+            int vPad = UiHelper.dp(this, tv ? 24 : 16);
+            detailHeaderContainer.setPadding(hPad, vPad, hPad, vPad);
+        }
+        if (qualitiesSection != null) {
+            qualitiesSection.setPadding(hPad, UiHelper.dp(this, 18), hPad, 0);
+        }
+        if (seasonsSection != null) {
+            seasonsSection.setPadding(hPad, UiHelper.dp(this, 20), hPad, 0);
+        }
     }
 
     private void loadDetail(boolean force) {
@@ -277,6 +329,10 @@ public final class DetailActivity extends AppCompatActivity {
 
         renderMovieQualities(movieEditions, availQualities);
         renderSeasonsAndEpisodes();
+
+        if (UiHelper.isAndroidTv(this) && btnPlayBest.getVisibility() == View.VISIBLE) {
+            btnPlayBest.post(() -> btnPlayBest.requestFocus());
+        }
     }
 
     private void renderMovieQualities(List<Models.MediaEdition> movieEditions, Set<String> availQualities) {
@@ -373,6 +429,7 @@ public final class DetailActivity extends AppCompatActivity {
                 bundle.item.id, bundle.item.title, file, ed.subtitles, null,
                 Collections.emptyList(), 0, fq, ed.serverLabel, allOpts,
                 hist != null && !hist.completed ? hist.position : 0)));
+        UiHelper.applyTvFocusEffect(playBtn, 1.04f);
         actions.addView(playBtn);
 
         MaterialButton vlcBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
@@ -382,6 +439,7 @@ public final class DetailActivity extends AppCompatActivity {
         vp.leftMargin = UiHelper.dp(this, 6);
         vlcBtn.setLayoutParams(vp);
         vlcBtn.setOnClickListener(v -> UiHelper.openInExternalPlayer(this, file.url, bundle.item.title));
+        UiHelper.applyTvFocusEffect(vlcBtn, 1.05f);
         actions.addView(vlcBtn);
 
         MaterialButton dlBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
@@ -391,6 +449,7 @@ public final class DetailActivity extends AppCompatActivity {
         dp.leftMargin = UiHelper.dp(this, 6);
         dlBtn.setLayoutParams(dp);
         dlBtn.setOnClickListener(v -> UiHelper.openExternalBrowser(this, file.url, false));
+        UiHelper.applyTvFocusEffect(dlBtn, 1.05f);
         actions.addView(dlBtn);
 
         MaterialButton copyBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
@@ -404,6 +463,7 @@ public final class DetailActivity extends AppCompatActivity {
             if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("CineVault URL", file.url));
             Toast.makeText(this, "Direct stream URL copied", Toast.LENGTH_SHORT).show();
         });
+        UiHelper.applyTvFocusEffect(copyBtn, 1.05f);
         actions.addView(copyBtn);
 
         card.addView(actions);
@@ -534,6 +594,7 @@ public final class DetailActivity extends AppCompatActivity {
                     ep.quality != null ? ep.quality : (bundle.item.quality != null ? bundle.item.quality : "HD"),
                     srv, Collections.emptyList(),
                     hist != null && !hist.completed ? hist.position : 0)));
+            UiHelper.applyTvFocusEffect(pbtn, 1.05f);
             row.addView(pbtn);
 
             episodesList.addView(row);
@@ -547,6 +608,7 @@ public final class DetailActivity extends AppCompatActivity {
         chip.setChecked(selected);
         chip.setTextColor(0xFFF3F6FC);
         chip.setOnClickListener(v -> onClick.run());
+        UiHelper.applyTvFocusEffect(chip, 1.05f);
         group.addView(chip);
     }
 

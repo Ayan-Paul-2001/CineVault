@@ -117,6 +117,15 @@ public class CineVaultUnitTest {
         String sanitized = ServerConfig.sanitizeMediaUrl("http://ftp16.circleftp.net/FILE/Cult 2026 [Hindi].mkv");
         assertEquals("http://ftp16.circleftp.net/FILE/Cult%202026%20%5BHindi%5D.mkv", sanitized);
 
+        String hashFile = ServerConfig.sanitizeMediaUrl("http://172.16.50.14/DHAKA-FLIX-14/Movies/#Alive (2020)/#Alive 100% HD.mkv");
+        assertEquals("http://172.16.50.14/DHAKA-FLIX-14/Movies/%23Alive%20(2020)/%23Alive%20100%25%20HD.mkv", hashFile);
+
+        String mixedPct = ServerConfig.sanitizeMediaUrl("http://ftp8.circleftp.net/FILE/100% Love%20(2019).mkv");
+        assertEquals("http://ftp8.circleftp.net/FILE/100%25%20Love%20(2019).mkv", mixedPct);
+
+        assertEquals("identity", ServerConfig.mediaHeadersFor("http://172.16.50.14/movie.mkv").get("Accept-Encoding"));
+        assertEquals("http://10.16.100.244/", ServerConfig.mediaHeadersFor("http://10.16.100.214/m.mkv").get("Referer"));
+
         assertTrue(ServerConfig
                 .isTrustedUpdateUrl("https://github.com/user/repo/raw/main/public%20release/CineVault.apk"));
         assertTrue(ServerConfig

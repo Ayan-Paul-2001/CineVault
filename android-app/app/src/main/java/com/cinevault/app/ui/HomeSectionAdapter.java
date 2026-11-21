@@ -68,7 +68,24 @@ public final class HomeSectionAdapter extends RecyclerView.Adapter<HomeSectionAd
             title = v.findViewById(R.id.section_title);
             subtitle = v.findViewById(R.id.section_subtitle);
             seeAll = v.findViewById(R.id.btn_see_all);
+            boolean tv = UiHelper.isAndroidTv(v.getContext());
+            boolean tablet = UiHelper.isTablet(v.getContext());
+            if (tv || tablet) {
+                title.setTextSize(tv ? 20f : 18.5f);
+                subtitle.setTextSize(tv ? 13.5f : 12.5f);
+                seeAll.setTextSize(tv ? 14f : 13f);
+                int hPad = UiHelper.dp(v.getContext(), tv ? 28 : 22);
+                View headerRow = (View) title.getParent().getParent();
+                if (headerRow != null) {
+                    headerRow.setPadding(hPad, headerRow.getPaddingTop(), hPad, headerRow.getPaddingBottom());
+                }
+            }
+            UiHelper.applyTvFocusEffect(seeAll, 1.06f);
             RecyclerView rv = v.findViewById(R.id.section_items_recycler);
+            if (tv || tablet) {
+                int rPad = UiHelper.dp(v.getContext(), tv ? 24 : 18);
+                rv.setPadding(rPad, rv.getPaddingTop(), rPad, rv.getPaddingBottom());
+            }
             rv.setLayoutManager(new LinearLayoutManager(v.getContext(), LinearLayoutManager.HORIZONTAL, false));
             adapter = new MediaCardAdapter(false, false, onItemClick, null);
             rv.setAdapter(adapter);

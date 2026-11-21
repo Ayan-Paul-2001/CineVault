@@ -53,8 +53,10 @@ public final class CineVaultApp extends Application {
                 .build();
 
         streamingClient = httpClient.newBuilder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(35, TimeUnit.SECONDS)
+                .connectTimeout(20, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
                 .build();
 
         AppDatabase db = new AppDatabase(this);

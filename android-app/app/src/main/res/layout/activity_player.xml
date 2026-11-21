@@ -19,7 +19,8 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:clickable="true"
-        android:focusable="true" />
+        android:focusable="false"
+        android:focusableInTouchMode="false" />
 
     <!-- Custom Cinema Subtitle Overlay (supports live size + timing sync offset) -->
     <TextView
@@ -154,7 +155,8 @@
     <FrameLayout
         android:id="@+id/player_controls_overlay"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent"
+        android:clipChildren="false">
 
         <!-- Top Bar -->
         <LinearLayout
@@ -163,7 +165,7 @@
             android:layout_gravity="top"
             android:background="#BB000000"
             android:clickable="true"
-            android:focusable="true"
+            android:focusable="false"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingHorizontal="12dp"
@@ -173,8 +175,9 @@
                 android:id="@+id/btn_player_back"
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
+                android:background="@drawable/bg_tv_button_focus"
                 android:contentDescription="Back"
+                android:focusable="true"
                 android:src="@drawable/ic_back"
                 app:tint="#FFFFFF" />
 
@@ -209,8 +212,9 @@
                 android:id="@+id/btn_player_rotate"
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
+                android:background="@drawable/bg_tv_button_focus"
                 android:contentDescription="Rotate"
+                android:focusable="true"
                 android:src="@drawable/ic_rotate"
                 app:tint="#FFFFFF" />
         </LinearLayout>
@@ -220,8 +224,10 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
+            android:clipChildren="false"
             android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:orientation="horizontal"
+            android:padding="12dp">
 
             <ImageButton
                 android:id="@+id/btn_player_rew"
@@ -229,6 +235,7 @@
                 android:layout_height="54dp"
                 android:background="@drawable/bg_circle_dark"
                 android:contentDescription="Rewind 10s"
+                android:focusable="true"
                 android:padding="12dp"
                 android:src="@drawable/ic_replay_10"
                 app:tint="#FFFFFF" />
@@ -240,6 +247,7 @@
                 android:layout_marginHorizontal="26dp"
                 android:background="@drawable/bg_circle_accent"
                 android:contentDescription="Play or Pause"
+                android:focusable="true"
                 android:padding="16dp"
                 android:src="@drawable/ic_pause"
                 app:tint="#FFFFFF" />
@@ -250,6 +258,7 @@
                 android:layout_height="54dp"
                 android:background="@drawable/bg_circle_dark"
                 android:contentDescription="Forward 10s"
+                android:focusable="true"
                 android:padding="12dp"
                 android:src="@drawable/ic_forward_10"
                 app:tint="#FFFFFF" />
@@ -262,7 +271,7 @@
             android:layout_gravity="bottom"
             android:background="#CC000000"
             android:clickable="true"
-            android:focusable="true"
+            android:focusable="false"
             android:orientation="vertical"
             android:paddingHorizontal="16dp"
             android:paddingVertical="10dp">
@@ -287,6 +296,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="8dp"
                     android:layout_weight="1"
+                    android:focusable="true"
                     android:progressTint="@color/cv_accent"
                     android:thumbTint="@color/cv_accent" />
 
@@ -316,6 +326,9 @@
                         android:id="@+id/btn_player_next_ep"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
                         android:text="Next Ep"
@@ -328,7 +341,10 @@
                         android:id="@+id/btn_player_scale"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
                         android:drawablePadding="5dp"
+                        android:focusable="true"
                         android:gravity="center_vertical"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
@@ -342,6 +358,9 @@
                         android:id="@+id/btn_player_audio"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
                         android:text="Audio"
@@ -353,6 +372,9 @@
                         android:id="@+id/btn_player_cc"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
                         android:text="CC"
@@ -364,6 +386,9 @@
                         android:id="@+id/btn_player_quality"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
                         android:text="Quality"
@@ -376,6 +401,9 @@
                         android:id="@+id/btn_player_external"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="6dp"
                         android:text="VLC"

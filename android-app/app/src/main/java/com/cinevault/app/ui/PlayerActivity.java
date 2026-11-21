@@ -10,8 +10,10 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
@@ -47,9 +49,13 @@ import androidx.media3.common.text.Cue;
 import androidx.media3.common.text.CueGroup;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.mp4.Mp4Extractor;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
@@ -59,8 +65,10 @@ import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Fullscreen Cinema Video Player powered by AndroidX Media3 ExoPlayer + Jellyfin FFmpeg Audio Decoder.
@@ -122,10 +130,12 @@ public final class PlayerActivity extends AppCompatActivity {
     private TextView cinemaSubText, titleView, subtitleView, posTimeView, durTimeView;
     private TextView btnNextEp, btnScale, btnAudio, btnCc, btnQuality, btnExternal;
     private ImageButton btnPlayPause;
+    private View btnRotate, btnRew, btnFwd;
     private SeekBar seekBar;
     private View bufferingView, controlsOverlay;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean isTvDevice = false;
     private boolean controlsVisible = true;
     private boolean isLandscape = true;
     private boolean isSeeking = false;
@@ -135,6 +145,14 @@ public final class PlayerActivity extends AppCompatActivity {
     private float subTextSp = 20f;
     private double subDelaySec = 0.0;
     private boolean subtitlesEnabled = true;
+
+    // Anti-time-jump clock watchdog & automatic playback error recovery
+    private long lastStablePosMs = 0L;
+    private long lastUserSeekElapsedMs = 0L;
+    private int jumpRecoveryCount = 0;
+    private boolean retriedWithoutSubs = false;
+    private int ioRetryCount = 0;
+    private final Set<String> failedStreamUrls = new HashSet<>();
 
     // VLC-style Video Size / Aspect Ratio state
     private int scaleModeIndex = 0;
@@ -178,20 +196,53 @@ public final class PlayerActivity extends AppCompatActivity {
         }
     };
 
+    private void markUserSeek() {
+        lastUserSeekElapsedMs = SystemClock.elapsedRealtime();
+    }
+
     private final Runnable progressPollTask = new Runnable() {
         @Override
         public void run() {
             if (player != null) {
-                long posMs = Math.max(0, player.getCurrentPosition());
-                long durMs = Math.max(0, player.getDuration());
-                if (!isSeeking && durMs > 0) {
+                long rawPos = player.getCurrentPosition();
+                long rawDur = player.getDuration();
+                long posMs = rawPos == C.TIME_UNSET ? 0L : Math.max(0L, rawPos);
+                long durMs = rawDur == C.TIME_UNSET ? 0L : Math.max(0L, rawDur);
+
+                boolean userRecentlySought = (SystemClock.elapsedRealtime() - lastUserSeekElapsedMs) <= 3000L;
+                if (player.getPlaybackState() == Player.STATE_READY && player.isPlaying() && !isSeeking) {
+                    if (!userRecentlySought && lastStablePosMs > 1000L && durMs > 0L) {
+                        long deltaMs = posMs - lastStablePosMs;
+                        boolean suddenForwardJump = deltaMs > 120_000L && posMs < (durMs - 5_000L);
+                        boolean suddenBackwardJump = deltaMs < -30_000L;
+                        if ((suddenForwardJump || suddenBackwardJump) && jumpRecoveryCount < 4) {
+                            jumpRecoveryCount++;
+                            long recoverMs = Math.min(durMs - 1000L, lastStablePosMs + 1000L);
+                            markUserSeek();
+                            player.seekTo(Math.max(0L, recoverMs));
+                            handler.postDelayed(this, 500);
+                            return;
+                        }
+                    }
+                    if (userRecentlySought || lastStablePosMs == 0L || Math.abs(posMs - lastStablePosMs) <= 15_000L) {
+                        lastStablePosMs = posMs;
+                    }
+                } else if (userRecentlySought && posMs > 0L) {
+                    lastStablePosMs = posMs;
+                }
+
+                if (!isSeeking && durMs > 0L) {
+                    int durSec = (int) (durMs / 1000L);
+                    int posSecInt = (int) (posMs / 1000L);
                     posTimeView.setText(Models.formatDurationSec(posMs / 1000.0));
                     durTimeView.setText(Models.formatDurationSec(durMs / 1000.0));
-                    seekBar.setMax((int) (durMs / 1000));
-                    seekBar.setProgress((int) (posMs / 1000));
+                    if (seekBar.getMax() != durSec) {
+                        seekBar.setMax(durSec);
+                    }
+                    seekBar.setProgress(posSecInt);
                 }
-                double posSec = posMs / 1000.0;
-                if (Math.abs(posSec - lastSavedSec) >= 8.0) {
+                double posSec = lastStablePosMs > 0L ? (lastStablePosMs / 1000.0) : (posMs / 1000.0);
+                if (posSec >= 5.0 && Math.abs(posSec - lastSavedSec) >= 8.0) {
                     lastSavedSec = posSec;
                     persistProgress();
                 }
@@ -221,10 +272,19 @@ public final class PlayerActivity extends AppCompatActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
+                if (isTvDevice && controlsVisible) {
+                    controlsVisible = false;
+                    controlsOverlay.setVisibility(View.GONE);
+                    updateSubtitleMargin();
+                    return;
+                }
                 persistProgress();
                 finish();
             }
         });
+
+        isTvDevice = UiHelper.isAndroidTv(this);
+        subTextSp = isTvDevice ? 26f : (UiHelper.isTablet(this) ? 23f : 20f);
 
         enterImmersive();
         bindViews();
@@ -233,6 +293,121 @@ public final class PlayerActivity extends AppCompatActivity {
         openCurrentSession();
         handler.post(progressPollTask);
         scheduleHideControls();
+        if (isTvDevice && btnPlayPause != null) {
+            btnPlayPause.post(() -> btnPlayPause.requestFocus());
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            int code = event.getKeyCode();
+            if (code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || code == KeyEvent.KEYCODE_SPACE) {
+                togglePlayPause();
+                showControlsAndFocus(btnPlayPause);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MEDIA_PLAY) {
+                if (player != null) player.play();
+                showControlsAndFocus(btnPlayPause);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MEDIA_PAUSE) {
+                if (player != null) player.pause();
+                showControlsAndFocus(btnPlayPause);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || code == KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD) {
+                seekRelativeWithHud(15);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MEDIA_REWIND || code == KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD) {
+                seekRelativeWithHud(-15);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MEDIA_NEXT && hasNextEpisode()) {
+                switchEpisode(session.playlistIndex + 1);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_CAPTIONS) {
+                showControlsAndFocus(btnCc);
+                showSubtitleDialog();
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_TV_ZOOM_MODE || code == KeyEvent.KEYCODE_ZOOM_IN || code == KeyEvent.KEYCODE_A) {
+                setVideoScaleMode((scaleModeIndex + 1) % SCALE_MODES.length, true);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_INFO) {
+                showControlsAndFocus(btnPlayPause);
+                return true;
+            }
+
+            if (!controlsVisible) {
+                if (code == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    seekRelativeWithHud(-10);
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    seekRelativeWithHud(10);
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
+                    togglePlayPause();
+                    showControlsAndFocus(btnPlayPause);
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_UP) {
+                    showControlsAndFocus(btnPlayPause);
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    showControlsAndFocus(seekBar != null ? seekBar : btnScale);
+                    return true;
+                }
+            } else if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN
+                    || code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT
+                    || code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
+                scheduleHideControls();
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private void togglePlayPause() {
+        if (player == null) return;
+        if (player.isPlaying()) player.pause();
+        else player.play();
+    }
+
+    private void showControlsAndFocus(View target) {
+        controlsVisible = true;
+        controlsOverlay.setVisibility(View.VISIBLE);
+        updateSubtitleMargin();
+        if (target != null && target.getVisibility() == View.VISIBLE) {
+            target.post(target::requestFocus);
+        }
+        scheduleHideControls();
+    }
+
+    private void seekRelativeWithHud(int deltaSec) {
+        if (player == null) return;
+        long target = Math.max(0, player.getCurrentPosition() + deltaSec * 1000L);
+        long dur = player.getDuration();
+        if (dur > 0 && dur != C.TIME_UNSET) target = Math.min(dur, target);
+        markUserSeek();
+        lastStablePosMs = target;
+        player.seekTo(target);
+        if (scaleHud != null) {
+            handler.removeCallbacks(hideScaleHudTask);
+            scaleHud.animate().cancel();
+            scaleHud.setAlpha(1f);
+            String prefix = deltaSec >= 0 ? "+" + deltaSec + "s" : deltaSec + "s";
+            scaleHudTitle.setText(prefix + " · " + Models.formatDurationSec(target / 1000.0));
+            scaleHudHint.setText("D-Pad Left/Right to seek · OK Play/Pause");
+            scaleHud.setVisibility(View.VISIBLE);
+            handler.postDelayed(hideScaleHudTask, 950);
+        }
     }
 
     @Override
@@ -272,12 +447,43 @@ public final class PlayerActivity extends AppCompatActivity {
         durTimeView = findViewById(R.id.player_dur_time);
         seekBar = findViewById(R.id.player_seekbar);
         btnPlayPause = findViewById(R.id.btn_player_play_pause);
+        btnRotate = findViewById(R.id.btn_player_rotate);
+        btnRew = findViewById(R.id.btn_player_rew);
+        btnFwd = findViewById(R.id.btn_player_fwd);
         btnNextEp = findViewById(R.id.btn_player_next_ep);
         btnScale = findViewById(R.id.btn_player_scale);
         btnAudio = findViewById(R.id.btn_player_audio);
         btnCc = findViewById(R.id.btn_player_cc);
         btnQuality = findViewById(R.id.btn_player_quality);
         btnExternal = findViewById(R.id.btn_player_external);
+
+        seekBar.setKeyProgressIncrement(15);
+        UiHelper.applyTvFocusEffect(btnRew, 1.12f);
+        UiHelper.applyTvFocusEffect(btnPlayPause, 1.12f);
+        UiHelper.applyTvFocusEffect(btnFwd, 1.12f);
+        UiHelper.applyTvFocusEffect(btnNextEp, 1.06f);
+        UiHelper.applyTvFocusEffect(btnScale, 1.06f);
+        UiHelper.applyTvFocusEffect(btnAudio, 1.06f);
+        UiHelper.applyTvFocusEffect(btnCc, 1.06f);
+        UiHelper.applyTvFocusEffect(btnQuality, 1.06f);
+        UiHelper.applyTvFocusEffect(btnExternal, 1.06f);
+
+        if (isTvDevice) {
+            btnRotate.setVisibility(View.GONE);
+            titleView.setTextSize(20f);
+            subtitleView.setTextSize(13.5f);
+            posTimeView.setTextSize(14f);
+            durTimeView.setTextSize(14f);
+            btnNextEp.setTextSize(14.5f);
+            btnScale.setTextSize(14.5f);
+            btnAudio.setTextSize(14.5f);
+            btnCc.setTextSize(14.5f);
+            btnQuality.setTextSize(14.5f);
+            btnExternal.setTextSize(14.5f);
+        } else if (UiHelper.isTablet(this)) {
+            titleView.setTextSize(18f);
+            subtitleView.setTextSize(12.5f);
+        }
 
         if (playerView.getSubtitleView() != null) {
             playerView.getSubtitleView().setVisibility(View.GONE);
@@ -349,12 +555,28 @@ public final class PlayerActivity extends AppCompatActivity {
 
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
-                if (fromUser) posTimeView.setText(Models.formatDurationSec(progress));
+                if (fromUser) {
+                    posTimeView.setText(Models.formatDurationSec(progress));
+                    // Seek immediately for TV D-Pad / keyboard Left-Right; touch waits for release
+                    if (!isSeeking && !sb.isInTouchMode() && player != null) {
+                        long targetMs = progress * 1000L;
+                        markUserSeek();
+                        lastStablePosMs = targetMs;
+                        player.seekTo(targetMs);
+                        scheduleHideControls();
+                    }
+                }
             }
-            @Override public void onStartTrackingTouch(SeekBar sb) { isSeeking = true; }
+            @Override public void onStartTrackingTouch(SeekBar sb) {
+                isSeeking = true;
+                markUserSeek();
+            }
             @Override public void onStopTrackingTouch(SeekBar sb) {
                 isSeeking = false;
-                if (player != null) player.seekTo(sb.getProgress() * 1000L);
+                long targetMs = sb.getProgress() * 1000L;
+                markUserSeek();
+                lastStablePosMs = targetMs;
+                if (player != null) player.seekTo(targetMs);
                 scheduleHideControls();
             }
         });
@@ -483,17 +705,14 @@ public final class PlayerActivity extends AppCompatActivity {
 
     private void attachLoudnessEnhancer(int audioSessionId) {
         releaseLoudnessEnhancer();
+        // Keep LoudnessEnhancer unattached unless volume is boosted above 100% to avoid AudioTrack clock drift on tablets
+        if (currentVolumePct <= 100.5f) return;
         if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId == 0) return;
         try {
             loudnessEnhancer = new LoudnessEnhancer(audioSessionId);
-            if (currentVolumePct > 100f) {
-                int gainMb = Math.round(((currentVolumePct - 100f) / 100f) * 1500f);
-                loudnessEnhancer.setTargetGain(gainMb);
-                loudnessEnhancer.setEnabled(true);
-            } else {
-                loudnessEnhancer.setTargetGain(0);
-                loudnessEnhancer.setEnabled(false);
-            }
+            int gainMb = Math.round(((currentVolumePct - 100f) / 100f) * 1500f);
+            loudnessEnhancer.setTargetGain(gainMb);
+            loudnessEnhancer.setEnabled(true);
         } catch (Exception ignored) {
             loudnessEnhancer = null;
         }
@@ -501,17 +720,16 @@ public final class PlayerActivity extends AppCompatActivity {
 
     private void setAudioBoostMillibels(int gainMb) {
         try {
+            if (gainMb <= 0) {
+                releaseLoudnessEnhancer();
+                return;
+            }
             if (loudnessEnhancer == null && player != null) {
                 attachLoudnessEnhancer(player.getAudioSessionId());
             }
             if (loudnessEnhancer != null) {
-                if (gainMb > 0) {
-                    loudnessEnhancer.setTargetGain(gainMb);
-                    loudnessEnhancer.setEnabled(true);
-                } else {
-                    loudnessEnhancer.setTargetGain(0);
-                    loudnessEnhancer.setEnabled(false);
-                }
+                loudnessEnhancer.setTargetGain(gainMb);
+                loudnessEnhancer.setEnabled(true);
             }
         } catch (Exception ignored) {}
     }
@@ -655,15 +873,22 @@ public final class PlayerActivity extends AppCompatActivity {
 
     private void initPlayer() {
         DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
-                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON);
+                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                .setEnableDecoderFallback(true);
 
-        player = new ExoPlayer.Builder(this, renderersFactory).build();
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(20_000, 90_000, 2_500, 5_000)
+                .build();
+
+        player = new ExoPlayer.Builder(this, renderersFactory)
+                .setLoadControl(loadControl)
+                .build();
         playerView.setPlayer(player);
 
         player.addListener(new Player.Listener() {
             @Override
             public void onAudioSessionIdChanged(int audioSessionId) {
-                attachLoudnessEnhancer(audioSessionId);
+                if (currentVolumePct > 100.5f) attachLoudnessEnhancer(audioSessionId);
             }
 
             @Override
@@ -686,10 +911,16 @@ public final class PlayerActivity extends AppCompatActivity {
             public void onPlaybackStateChanged(int state) {
                 bufferingView.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
                 if (state == Player.STATE_READY) {
-                    if (loudnessEnhancer == null) attachLoudnessEnhancer(player.getAudioSessionId());
+                    ioRetryCount = 0;
+                    if (currentVolumePct > 100.5f && loudnessEnhancer == null) {
+                        attachLoudnessEnhancer(player.getAudioSessionId());
+                    }
                     if (!didInitialSeek && session.startTime > 5) {
                         didInitialSeek = true;
-                        player.seekTo((long) (session.startTime * 1000));
+                        long targetMs = (long) (session.startTime * 1000);
+                        markUserSeek();
+                        lastStablePosMs = targetMs;
+                        player.seekTo(targetMs);
                     }
                 }
                 if (state == Player.STATE_ENDED) {
@@ -734,6 +965,50 @@ public final class PlayerActivity extends AppCompatActivity {
             @Override
             public void onPlayerError(@NonNull PlaybackException error) {
                 bufferingView.setVisibility(View.GONE);
+                long resumeMs = Math.max(lastStablePosMs, (long) (session.startTime * 1000));
+
+                // 1. Broken external .srt/.vtt subtitle inside MergingMediaSource must never kill the video
+                if (!retriedWithoutSubs && !session.externalSubtitles.isEmpty()) {
+                    retriedWithoutSubs = true;
+                    Toast.makeText(PlayerActivity.this,
+                            "External subtitle unavailable — playing video with embedded tracks...",
+                            Toast.LENGTH_SHORT).show();
+                    openCurrentSessionInternal(false, resumeMs);
+                    return;
+                }
+
+                // 2. Transient BDIX network / timeout hiccup — auto-reconnect at last stable timestamp
+                boolean isIoError = error.errorCode >= 2000 && error.errorCode < 3000;
+                if (isIoError && ioRetryCount < 2) {
+                    ioRetryCount++;
+                    bufferingView.setVisibility(View.VISIBLE);
+                    long finalResumeMs = resumeMs;
+                    handler.postDelayed(() -> {
+                        if (!isFinishing() && !isDestroyed() && player != null) {
+                            openCurrentSessionInternal(!retriedWithoutSubs, finalResumeMs);
+                        }
+                    }, 1200L);
+                    return;
+                }
+
+                // 3. Auto-failover to another working mirror / server quality if available
+                failedStreamUrls.add(session.file.url);
+                for (Models.QualityOption alt : session.qualityOptions) {
+                    if (alt.file.online && !failedStreamUrls.contains(alt.file.url)
+                            && ServerConfig.isAllowedUrl(alt.file.url)) {
+                        Toast.makeText(PlayerActivity.this,
+                                "Switching to backup mirror (" + alt.serverLabel + ")...",
+                                Toast.LENGTH_SHORT).show();
+                        double resumeSec = resumeMs / 1000.0;
+                        session = new Models.PlaybackSession(
+                                session.mediaId, session.title, alt.file, alt.subtitles, null,
+                                session.playlist, session.playlistIndex, alt.quality, alt.serverLabel,
+                                session.qualityOptions, resumeSec);
+                        openCurrentSession();
+                        return;
+                    }
+                }
+
                 Toast.makeText(PlayerActivity.this,
                         "Playback error (" + error.getErrorCodeName() + "). Try another quality or tap VLC.",
                         Toast.LENGTH_LONG).show();
@@ -752,10 +1027,21 @@ public final class PlayerActivity extends AppCompatActivity {
     }
 
     private void openCurrentSession() {
-        didInitialSeek = false;
+        retriedWithoutSubs = false;
+        ioRetryCount = 0;
+        jumpRecoveryCount = 0;
+        openCurrentSessionInternal(true, (long) (session.startTime * 1000));
+    }
+
+    private void openCurrentSessionInternal(boolean includeExternalSubtitles, long resumePosMs) {
+        long safeStartMs = resumePosMs > 5000L ? resumePosMs : 0L;
+        didInitialSeek = true;
         didAutoSelectSub = false;
-        lastSavedSec = 0;
+        lastSavedSec = safeStartMs / 1000.0;
+        lastStablePosMs = safeStartMs;
+        markUserSeek();
         cinemaSubText.setVisibility(View.GONE);
+        bufferingView.setVisibility(View.VISIBLE);
 
         List<String> titleParts = new ArrayList<>();
         titleParts.add(session.title);
@@ -777,7 +1063,7 @@ public final class PlayerActivity extends AppCompatActivity {
                 .setDefaultRequestProperties(ServerConfig.mediaHeadersFor(safeStreamUrl));
 
         MediaItem.Builder mb = new MediaItem.Builder().setUri(Uri.parse(safeStreamUrl));
-        if (!session.externalSubtitles.isEmpty()) {
+        if (includeExternalSubtitles && !session.externalSubtitles.isEmpty()) {
             List<MediaItem.SubtitleConfiguration> subConfigs = new ArrayList<>();
             for (int i = 0; i < session.externalSubtitles.size(); i++) {
                 Models.MediaFileEntry ext = session.externalSubtitles.get(i);
@@ -796,8 +1082,12 @@ public final class PlayerActivity extends AppCompatActivity {
             if (!subConfigs.isEmpty()) mb.setSubtitleConfigurations(subConfigs);
         }
 
-        DefaultMediaSourceFactory msFactory = new DefaultMediaSourceFactory(dsFactory);
-        player.setMediaSource(msFactory.createMediaSource(mb.build()));
+        DefaultExtractorsFactory extractorsFactory = new DefaultExtractorsFactory()
+                .setConstantBitrateSeekingEnabled(true)
+                .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS);
+        DefaultMediaSourceFactory msFactory = new DefaultMediaSourceFactory(dsFactory, extractorsFactory)
+                .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy(6));
+        player.setMediaSource(msFactory.createMediaSource(mb.build()), safeStartMs);
         player.prepare();
         player.play();
     }
@@ -1012,7 +1302,9 @@ public final class PlayerActivity extends AppCompatActivity {
         if (player == null) return;
         long target = Math.max(0, player.getCurrentPosition() + deltaSec * 1000L);
         long dur = player.getDuration();
-        if (dur > 0) target = Math.min(dur, target);
+        if (dur > 0 && dur != C.TIME_UNSET) target = Math.min(dur, target);
+        markUserSeek();
+        lastStablePosMs = target;
         player.seekTo(target);
         scheduleHideControls();
     }
@@ -1032,13 +1324,16 @@ public final class PlayerActivity extends AppCompatActivity {
 
     private void scheduleHideControls() {
         handler.removeCallbacks(hideControlsTask);
-        handler.postDelayed(hideControlsTask, 4000);
+        handler.postDelayed(hideControlsTask, isTvDevice ? 6000 : 4000);
     }
 
     private void persistProgress() {
         if (player == null) return;
-        double pos = player.getCurrentPosition() / 1000.0;
-        double dur = Math.max(0, player.getDuration() / 1000.0);
+        long rawPos = player.getCurrentPosition();
+        long rawDur = player.getDuration();
+        double currentSec = (rawPos == C.TIME_UNSET || rawPos < 0) ? 0.0 : (rawPos / 1000.0);
+        double pos = lastStablePosMs > 5000L ? (lastStablePosMs / 1000.0) : currentSec;
+        double dur = (rawDur == C.TIME_UNSET || rawDur < 0) ? 0.0 : (rawDur / 1000.0);
         if (pos < 5) return;
         Models.PlaybackSession snap = session;
         app.ioExecutor.execute(() -> app.repository.db.upsertWatchProgress(

@@ -56,10 +56,38 @@ public final class MediaCardAdapter extends RecyclerView.Adapter<MediaCardAdapte
     @Override
     public VH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_media_card, parent, false);
+        boolean tv = UiHelper.isAndroidTv(parent.getContext());
+        boolean tablet = UiHelper.isTablet(parent.getContext());
+        View posterFrame = v.findViewById(R.id.poster_frame);
         if (gridMode) {
             v.setLayoutParams(new RecyclerView.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            if (posterFrame != null && (tv || tablet)) {
+                ViewGroup.LayoutParams plp = posterFrame.getLayoutParams();
+                plp.height = UiHelper.dp(parent.getContext(), tv ? 236 : 216);
+                posterFrame.setLayoutParams(plp);
+            }
+        } else if (tv || tablet) {
+            int cardW = UiHelper.dp(parent.getContext(), tv ? 172 : 156);
+            int posterH = UiHelper.dp(parent.getContext(), tv ? 242 : 220);
+            RecyclerView.LayoutParams rlp = new RecyclerView.LayoutParams(cardW, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rlp.setMarginEnd(UiHelper.dp(parent.getContext(), tv ? 10 : 6));
+            v.setLayoutParams(rlp);
+            if (posterFrame != null) {
+                ViewGroup.LayoutParams plp = posterFrame.getLayoutParams();
+                plp.height = posterH;
+                posterFrame.setLayoutParams(plp);
+            }
         }
+        v.setOnFocusChangeListener((view, hasFocus) -> {
+            float scale = hasFocus ? (tv ? 1.07f : 1.04f) : 1.0f;
+            view.animate()
+                    .scaleX(scale)
+                    .scaleY(scale)
+                    .translationZ(hasFocus ? UiHelper.dp(view.getContext(), 8) : 0f)
+                    .setDuration(120)
+                    .start();
+        });
         return new VH(v);
     }
 
@@ -69,6 +97,9 @@ public final class MediaCardAdapter extends RecyclerView.Adapter<MediaCardAdapte
         h.boundId = item.id;
 
         h.title.setText(item.title);
+        boolean tv = UiHelper.isAndroidTv(h.itemView.getContext());
+        h.title.setTextSize(tv ? 14f : 12.5f);
+        h.subtitle.setTextSize(tv ? 12f : 11f);
         ServerConfig.CategoryDef cat = ServerConfig.CATEGORY_BY_ID.get(item.category);
         String catLabel = cat != null ? cat.shortLabel : item.category;
         String sub = item.year != null ? item.year + " · " + catLabel : catLabel;

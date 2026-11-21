@@ -1,13 +1,17 @@
 package com.cinevault.app.ui;
 
 import android.app.DownloadManager;
+import android.app.UiModeManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.View;
 import android.widget.ImageView;
@@ -16,6 +20,7 @@ import android.widget.Toast;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.model.GlideUrl;
 import com.bumptech.glide.load.model.LazyHeaders;
+import com.cinevault.app.R;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 
@@ -23,10 +28,61 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Shared UI utilities: Glide poster loader with ICC Referer headers, badge colors, safe external links.
+ * Shared UI utilities: Glide poster loader with ICC Referer headers, TV/Tablet responsive helpers,
+ * D-Pad focus highlight effects, badge colors, and direct update downloads.
  */
 public final class UiHelper {
     private UiHelper() {}
+
+    public static boolean isAndroidTv(Context ctx) {
+        if (ctx == null) return false;
+        UiModeManager umm = (UiModeManager) ctx.getSystemService(Context.UI_MODE_SERVICE);
+        if (umm != null && umm.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) {
+            return true;
+        }
+        PackageManager pm = ctx.getPackageManager();
+        return pm != null && (pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+                || pm.hasSystemFeature("android.hardware.type.television"));
+    }
+
+    public static float screenWidthDp(Context ctx) {
+        if (ctx == null) return 360f;
+        DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+        return dm.widthPixels / Math.max(1f, dm.density);
+    }
+
+    public static int smallestWidthDp(Context ctx) {
+        if (ctx == null) return 360;
+        return ctx.getResources().getConfiguration().smallestScreenWidthDp;
+    }
+
+    public static boolean isTablet(Context ctx) {
+        return !isAndroidTv(ctx) && smallestWidthDp(ctx) >= 600;
+    }
+
+    public static boolean useTopNavLayout(Context ctx) {
+        return isAndroidTv(ctx) || screenWidthDp(ctx) >= 720f;
+    }
+
+    /**
+     * Adds clean TV / keyboard D-Pad focus scale + elevation + foreground highlight so
+     * buttons, chips, and controls are unmistakably clear from 10 feet away without changing touch UX.
+     */
+    public static void applyTvFocusEffect(View view, float focusedScale) {
+        if (view == null) return;
+        view.setFocusable(true);
+        view.setOnFocusChangeListener((v, hasFocus) -> {
+            v.animate()
+                    .scaleX(hasFocus ? focusedScale : 1.0f)
+                    .scaleY(hasFocus ? focusedScale : 1.0f)
+                    .translationZ(hasFocus ? dp(v.getContext(), 6) : 0f)
+                    .setDuration(110)
+                    .start();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && v.getForeground() == null) {
+                v.setForeground(v.getContext().getDrawable(R.drawable.bg_tv_button_focus));
+            }
+        });
+    }
 
     private static final int[][] FALLBACK_PALETTES = {
             {0xFF1A1F36, 0xFF3B1D38, 0xFFE50914},

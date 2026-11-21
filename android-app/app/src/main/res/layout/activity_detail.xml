@@ -19,8 +19,9 @@
             android:id="@+id/btn_detail_back"
             android:layout_width="42dp"
             android:layout_height="42dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
+            android:background="@drawable/bg_tv_button_focus"
             android:contentDescription="Back"
+            android:focusable="true"
             android:src="@drawable/ic_back"
             app:tint="@color/cv_text" />
 
@@ -41,8 +42,9 @@
             android:id="@+id/btn_detail_refresh"
             android:layout_width="42dp"
             android:layout_height="42dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
+            android:background="@drawable/bg_tv_button_focus"
             android:contentDescription="Refresh"
+            android:focusable="true"
             android:src="@drawable/ic_refresh"
             app:tint="@color/cv_text" />
     </LinearLayout>
@@ -79,6 +81,7 @@
         android:visibility="gone">
 
         <LinearLayout
+            android:id="@+id/detail_body_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
@@ -86,6 +89,7 @@
 
             <!-- Header Section -->
             <LinearLayout
+                android:id="@+id/detail_header_container"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="@color/cv_bg_elev"
@@ -159,6 +163,7 @@
                     android:visibility="gone" />
 
                 <LinearLayout
+                    android:id="@+id/detail_actions_row"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"

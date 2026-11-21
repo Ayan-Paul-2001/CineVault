@@ -1121,7 +1121,7 @@
                             android:id="@+id/srv_app_version"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="V1.2.0"
+                            android:text="V1.2.1"
                             android:textColor="@color/cv_sky"
                             android:textSize="12sp"
                             android:textStyle="bold" />

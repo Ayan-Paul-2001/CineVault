@@ -35,6 +35,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
@@ -52,6 +53,8 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import androidx.media3.extractor.DefaultExtractorsFactory;
@@ -151,6 +154,7 @@ public final class PlayerActivity extends AppCompatActivity {
     private long lastUserSeekElapsedMs = 0L;
     private int jumpRecoveryCount = 0;
     private boolean retriedWithoutSubs = false;
+    private boolean useSoftwareVideoFallback = false;
     private int ioRetryCount = 0;
     private final Set<String> failedStreamUrls = new HashSet<>();
 
@@ -288,7 +292,7 @@ public final class PlayerActivity extends AppCompatActivity {
 
         enterImmersive();
         bindViews();
-        initPlayer();
+        initPlayer(false);
         loadSavedScaleMode();
         openCurrentSession();
         handler.post(progressPollTask);
@@ -871,19 +875,60 @@ public final class PlayerActivity extends AppCompatActivity {
         return null;
     }
 
-    private void initPlayer() {
+    private void initPlayer(boolean preferSoftwareVideo) {
+        releaseLoudnessEnhancer();
+        if (player != null) {
+            try {
+                playerView.setPlayer(null);
+                player.release();
+            } catch (Exception ignored) {}
+            player = null;
+        }
+
+        // PREFER Jellyfin FFmpeg Audio Decoder first so Dolby E-AC3 / AC3 / DTS / TrueHD never hit broken tablet OEM codecs
         DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
-                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
                 .setEnableDecoderFallback(true);
+
+        if (preferSoftwareVideo) {
+            renderersFactory.setMediaCodecSelector((mimeType, requiresSecureDecoder, requiresTunnelingDecoder) -> {
+                List<MediaCodecInfo> infos = MediaCodecUtil.getDecoderInfos(
+                        mimeType, requiresSecureDecoder, requiresTunnelingDecoder);
+                if (mimeType != null && mimeType.startsWith("video/")) {
+                    List<MediaCodecInfo> sw = new ArrayList<>();
+                    List<MediaCodecInfo> hw = new ArrayList<>();
+                    for (MediaCodecInfo info : infos) {
+                        String n = info.name != null ? info.name.toLowerCase(Locale.US) : "";
+                        if (info.softwareOnly || !info.hardwareAccelerated
+                                || n.startsWith("c2.android.") || n.startsWith("omx.google.")) {
+                            sw.add(info);
+                        } else {
+                            hw.add(info);
+                        }
+                    }
+                    sw.addAll(hw);
+                    return sw;
+                }
+                return infos;
+            });
+        }
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(20_000, 90_000, 2_500, 5_000)
                 .build();
 
+        AudioAttributes audioAttrs = new AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build();
+
         player = new ExoPlayer.Builder(this, renderersFactory)
                 .setLoadControl(loadControl)
+                .setAudioAttributes(audioAttrs, true)
+                .setHandleAudioBecomingNoisy(true)
                 .build();
         playerView.setPlayer(player);
+        applyVideoScaleMode(false, false);
 
         player.addListener(new Player.Listener() {
             @Override
@@ -967,7 +1012,19 @@ public final class PlayerActivity extends AppCompatActivity {
                 bufferingView.setVisibility(View.GONE);
                 long resumeMs = Math.max(lastStablePosMs, (long) (session.startTime * 1000));
 
-                // 1. Broken external .srt/.vtt subtitle inside MergingMediaSource must never kill the video
+                // 1. Hardware video decoder crashed mid-stream (e.g. ERROR_CODE_DECODING_FAILED on tablet) — seamlessly switch to Software Video Decoder
+                boolean isDecoderError = error.errorCode >= 4000 && error.errorCode < 5000;
+                if (isDecoderError && !useSoftwareVideoFallback) {
+                    useSoftwareVideoFallback = true;
+                    Toast.makeText(PlayerActivity.this,
+                            "Switched to Software Video Decoder for compatibility...",
+                            Toast.LENGTH_SHORT).show();
+                    initPlayer(true);
+                    openCurrentSessionInternal(!retriedWithoutSubs, resumeMs);
+                    return;
+                }
+
+                // 2. Broken external .srt/.vtt subtitle inside MergingMediaSource must never kill the video
                 if (!retriedWithoutSubs && !session.externalSubtitles.isEmpty()) {
                     retriedWithoutSubs = true;
                     Toast.makeText(PlayerActivity.this,
@@ -977,7 +1034,7 @@ public final class PlayerActivity extends AppCompatActivity {
                     return;
                 }
 
-                // 2. Transient BDIX network / timeout hiccup — auto-reconnect at last stable timestamp
+                // 3. Transient BDIX network / timeout hiccup — auto-reconnect at last stable timestamp
                 boolean isIoError = error.errorCode >= 2000 && error.errorCode < 3000;
                 if (isIoError && ioRetryCount < 2) {
                     ioRetryCount++;
@@ -991,7 +1048,7 @@ public final class PlayerActivity extends AppCompatActivity {
                     return;
                 }
 
-                // 3. Auto-failover to another working mirror / server quality if available
+                // 4. Auto-failover to another working mirror / server quality if available
                 failedStreamUrls.add(session.file.url);
                 for (Models.QualityOption alt : session.qualityOptions) {
                     if (alt.file.online && !failedStreamUrls.contains(alt.file.url)
@@ -1030,6 +1087,10 @@ public final class PlayerActivity extends AppCompatActivity {
         retriedWithoutSubs = false;
         ioRetryCount = 0;
         jumpRecoveryCount = 0;
+        if (useSoftwareVideoFallback) {
+            useSoftwareVideoFallback = false;
+            initPlayer(false);
+        }
         openCurrentSessionInternal(true, (long) (session.startTime * 1000));
     }
 
@@ -1052,7 +1113,7 @@ public final class PlayerActivity extends AppCompatActivity {
         List<String> subParts = new ArrayList<>();
         if (session.qualityLabel != null && !session.qualityLabel.isEmpty()) subParts.add(session.qualityLabel);
         if (session.serverLabel != null && !session.serverLabel.isEmpty()) subParts.add(session.serverLabel);
-        subParts.add("Media3 + FFmpeg Audio");
+        subParts.add(useSoftwareVideoFallback ? "SW Video + FFmpeg Audio" : "HW Video + FFmpeg Audio");
         subtitleView.setText(String.join(" · ", subParts));
 
         btnNextEp.setVisibility(hasNextEpisode() ? View.VISIBLE : View.GONE);

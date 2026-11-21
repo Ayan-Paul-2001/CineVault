@@ -90,8 +90,9 @@ public class CineVaultUnitTest {
         assertEquals("V1.2.0", forced.displayVersion);
         assertEquals(3, forced.latestVersionCode);
         assertEquals("CineVault.apk", forced.apkPackage);
-        assertEquals("https://github.com/octocat/cinevault/raw/main/public%20release/CineVault.apk",
+        assertEquals("https://github.com/octocat/cinevault/raw/main/CineVault.apk",
                 forced.downloadUrl);
+        assertEquals(60L * 60L * 1000L, UpdateService.AUTO_CHECK_INTERVAL_MS);
         assertEquals("Mandatory Update Required", forced.lockTitle);
 
         Models.AppUpdateInfo upToDate = UpdateService.parseVersionControlManifest(obj, "octocat/cinevault", "1.2.0", 3);

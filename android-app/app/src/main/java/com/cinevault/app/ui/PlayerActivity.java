@@ -1,17 +1,28 @@
 package com.cinevault.app.ui;
 
+import android.annotation.SuppressLint;
+import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.media.AudioManager;
+import android.media.audiofx.LoudnessEnhancer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
+import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.OptIn;
 import androidx.appcompat.app.AlertDialog;
@@ -49,6 +60,7 @@ import java.util.Locale;
 /**
  * Fullscreen Cinema Video Player powered by AndroidX Media3 ExoPlayer + Jellyfin FFmpeg Audio Decoder.
  * Supports hardware H.264/HEVC/10-bit video, Dolby AC3/EAC3/DTS audio, Dual/Multi-Audio switching,
+ * VLC-style left-side brightness slider and right-side volume + 200% sound boost slider,
  * automatic non-forced-first subtitle selection, subtitle size & timing offset, quality switcher,
  * Next Episode auto-advance, and persistent SQLite watch history resume.
  */
@@ -56,10 +68,20 @@ import java.util.Locale;
 public final class PlayerActivity extends AppCompatActivity {
     public static final String EXTRA_SESSION = "playback_session";
 
+    private static final int GESTURE_NONE = 0;
+    private static final int GESTURE_BRIGHTNESS = 1;
+    private static final int GESTURE_VOLUME = 2;
+
     private CineVaultApp app;
     private Models.PlaybackSession session;
     private ExoPlayer player;
     private PlayerView playerView;
+    private AudioManager audioManager;
+    private LoudnessEnhancer loudnessEnhancer;
+
+    private View gestureLayer, gestureHud, gestureBarTrack, gestureBarFill;
+    private ImageView gestureHudIcon;
+    private TextView gestureHudPercent, gestureHudLabel;
 
     private TextView cinemaSubText, titleView, subtitleView, posTimeView, durTimeView;
     private TextView btnNextEp, btnAudio, btnCc, btnQuality, btnExternal;
@@ -78,11 +100,29 @@ public final class PlayerActivity extends AppCompatActivity {
     private double subDelaySec = 0.0;
     private boolean subtitlesEnabled = true;
 
+    // VLC-style Brightness & Volume Boost gesture state
+    private int touchSlop;
+    private int gestureMode = GESTURE_NONE;
+    private float gestureStartX = 0f;
+    private float gestureStartY = 0f;
+    private float startBrightness = 0.5f;
+    private float startVolumePct = 50f;
+    private float currentVolumePct = -1f;
+
     private final Runnable hideControlsTask = () -> {
         if (player != null && player.isPlaying()) {
             controlsVisible = false;
             controlsOverlay.setVisibility(View.GONE);
             updateSubtitleMargin();
+        }
+    };
+
+    private final Runnable hideGestureHudTask = () -> {
+        if (gestureHud != null && gestureHud.getVisibility() == View.VISIBLE) {
+            gestureHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
+                gestureHud.setVisibility(View.GONE);
+                gestureHud.setAlpha(1f);
+            }).start();
         }
     };
 
@@ -114,6 +154,8 @@ public final class PlayerActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_player);
         app = CineVaultApp.get();
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
 
         Object extra = getIntent().getSerializableExtra(EXTRA_SESSION);
         if (!(extra instanceof Models.PlaybackSession)) { finish(); return; }
@@ -123,6 +165,14 @@ public final class PlayerActivity extends AppCompatActivity {
             finish();
             return;
         }
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                persistProgress();
+                finish();
+            }
+        });
 
         enterImmersive();
         bindViews();
@@ -139,8 +189,17 @@ public final class PlayerActivity extends AppCompatActivity {
         ctrl.hide(WindowInsetsCompat.Type.systemBars());
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     private void bindViews() {
         playerView = findViewById(R.id.exo_player_view);
+        gestureLayer = findViewById(R.id.player_gesture_layer);
+        gestureHud = findViewById(R.id.player_gesture_hud);
+        gestureBarTrack = findViewById(R.id.gesture_bar_track);
+        gestureBarFill = findViewById(R.id.gesture_bar_fill);
+        gestureHudIcon = findViewById(R.id.gesture_hud_icon);
+        gestureHudPercent = findViewById(R.id.gesture_hud_percent);
+        gestureHudLabel = findViewById(R.id.gesture_hud_label);
+
         cinemaSubText = findViewById(R.id.cinema_subtitle_text);
         bufferingView = findViewById(R.id.player_buffering);
         controlsOverlay = findViewById(R.id.player_controls_overlay);
@@ -160,8 +219,12 @@ public final class PlayerActivity extends AppCompatActivity {
             playerView.getSubtitleView().setVisibility(View.GONE);
         }
 
-        findViewById(R.id.player_root).setOnClickListener(v -> toggleControls());
-        findViewById(R.id.btn_player_back).setOnClickListener(v -> finish());
+        gestureLayer.setOnTouchListener(this::handleGestureTouch);
+
+        findViewById(R.id.btn_player_back).setOnClickListener(v -> {
+            persistProgress();
+            finish();
+        });
         findViewById(R.id.btn_player_rotate).setOnClickListener(v -> {
             isLandscape = !isLandscape;
             setRequestedOrientation(isLandscape
@@ -201,6 +264,172 @@ public final class PlayerActivity extends AppCompatActivity {
         });
     }
 
+    private boolean handleGestureTouch(View v, MotionEvent event) {
+        int action = event.getActionMasked();
+        int width = Math.max(1, v.getWidth());
+        int height = Math.max(1, v.getHeight());
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            gestureMode = GESTURE_NONE;
+            gestureStartX = event.getX();
+            gestureStartY = event.getY();
+            startBrightness = readCurrentBrightness();
+            startVolumePct = readCurrentVolumePct();
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_MOVE) {
+            float dx = event.getX() - gestureStartX;
+            float dy = gestureStartY - event.getY(); // Swipe up = positive increase
+
+            if (gestureMode == GESTURE_NONE) {
+                if (Math.abs(dy) > touchSlop && Math.abs(dy) > Math.abs(dx) * 1.15f) {
+                    gestureMode = (gestureStartX < width * 0.5f) ? GESTURE_BRIGHTNESS : GESTURE_VOLUME;
+                }
+            }
+
+            if (gestureMode == GESTURE_BRIGHTNESS) {
+                float delta = dy / (height * 0.60f);
+                float nextB = Math.max(0.02f, Math.min(1.0f, startBrightness + delta));
+                applyWindowBrightness(nextB);
+                showGestureHud(true, nextB, Math.round(nextB * 100) + "%", "Brightness", 0xFFF59E0B);
+                return true;
+            } else if (gestureMode == GESTURE_VOLUME) {
+                float deltaPct = (dy / (height * 0.65f)) * 200f;
+                float nextPct = Math.max(0f, Math.min(200f, startVolumePct + deltaPct));
+                applyVolumeAndBoost(nextPct);
+                boolean boosted = nextPct > 100.5f;
+                showGestureHud(false, nextPct / 200f, Math.round(nextPct) + "%",
+                        boosted ? "Boost" : "Volume", boosted ? 0xFFE50914 : 0xFF38BDF8);
+                return true;
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (gestureMode == GESTURE_NONE && action == MotionEvent.ACTION_UP) {
+                toggleControls();
+            } else if (gestureMode != GESTURE_NONE) {
+                handler.removeCallbacks(hideGestureHudTask);
+                handler.postDelayed(hideGestureHudTask, 800);
+            }
+            gestureMode = GESTURE_NONE;
+            return true;
+        }
+        return false;
+    }
+
+    private float readCurrentBrightness() {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (lp.screenBrightness >= 0f && lp.screenBrightness <= 1f) {
+            return lp.screenBrightness;
+        }
+        try {
+            int sys = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, 128);
+            return Math.max(0.05f, Math.min(1f, sys / 255f));
+        } catch (Exception e) {
+            return 0.5f;
+        }
+    }
+
+    private void applyWindowBrightness(float level) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = Math.max(0.02f, Math.min(1.0f, level));
+        getWindow().setAttributes(lp);
+    }
+
+    private float readCurrentVolumePct() {
+        if (currentVolumePct > 100f) return currentVolumePct;
+        if (audioManager == null) return 50f;
+        int max = Math.max(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+        int cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+        currentVolumePct = (cur / (float) max) * 100f;
+        return currentVolumePct;
+    }
+
+    private void applyVolumeAndBoost(float targetPct) {
+        currentVolumePct = Math.max(0f, Math.min(200f, targetPct));
+        if (audioManager != null) {
+            int max = Math.max(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+            if (currentVolumePct <= 100f) {
+                int targetVol = Math.round((currentVolumePct / 100f) * max);
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0);
+                setAudioBoostMillibels(0);
+            } else {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0);
+                int gainMb = Math.round(((currentVolumePct - 100f) / 100f) * 1500f);
+                setAudioBoostMillibels(gainMb);
+            }
+        }
+    }
+
+    private void attachLoudnessEnhancer(int audioSessionId) {
+        releaseLoudnessEnhancer();
+        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId == 0) return;
+        try {
+            loudnessEnhancer = new LoudnessEnhancer(audioSessionId);
+            if (currentVolumePct > 100f) {
+                int gainMb = Math.round(((currentVolumePct - 100f) / 100f) * 1500f);
+                loudnessEnhancer.setTargetGain(gainMb);
+                loudnessEnhancer.setEnabled(true);
+            } else {
+                loudnessEnhancer.setTargetGain(0);
+                loudnessEnhancer.setEnabled(false);
+            }
+        } catch (Exception ignored) {
+            loudnessEnhancer = null;
+        }
+    }
+
+    private void setAudioBoostMillibels(int gainMb) {
+        try {
+            if (loudnessEnhancer == null && player != null) {
+                attachLoudnessEnhancer(player.getAudioSessionId());
+            }
+            if (loudnessEnhancer != null) {
+                if (gainMb > 0) {
+                    loudnessEnhancer.setTargetGain(gainMb);
+                    loudnessEnhancer.setEnabled(true);
+                } else {
+                    loudnessEnhancer.setTargetGain(0);
+                    loudnessEnhancer.setEnabled(false);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void releaseLoudnessEnhancer() {
+        if (loudnessEnhancer != null) {
+            try { loudnessEnhancer.release(); } catch (Exception ignored) {}
+            loudnessEnhancer = null;
+        }
+    }
+
+    private void showGestureHud(boolean isBrightness, float fillFraction, String pctText, String label, int barColor) {
+        handler.removeCallbacks(hideGestureHudTask);
+        gestureHud.animate().cancel();
+        gestureHud.setAlpha(1f);
+        FrameLayout.LayoutParams hlp = (FrameLayout.LayoutParams) gestureHud.getLayoutParams();
+        hlp.gravity = Gravity.CENTER_VERTICAL | (isBrightness ? Gravity.START : Gravity.END);
+        int sideMargin = UiHelper.dp(this, 28);
+        hlp.leftMargin = isBrightness ? sideMargin : 0;
+        hlp.rightMargin = isBrightness ? 0 : sideMargin;
+        gestureHud.setLayoutParams(hlp);
+        gestureHud.setVisibility(View.VISIBLE);
+
+        gestureHudIcon.setImageResource(isBrightness ? R.drawable.ic_brightness : R.drawable.ic_volume);
+        gestureHudPercent.setText(pctText);
+        gestureHudLabel.setText(label);
+
+        int trackH = gestureBarTrack.getHeight();
+        if (trackH <= 0) trackH = UiHelper.dp(this, 120);
+        int fillH = Math.max(0, Math.min(trackH, Math.round(trackH * fillFraction)));
+        FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) gestureBarFill.getLayoutParams();
+        flp.height = fillH;
+        gestureBarFill.setLayoutParams(flp);
+        gestureBarFill.setBackgroundColor(barColor);
+    }
+
     private void initPlayer() {
         DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON);
@@ -210,11 +439,19 @@ public final class PlayerActivity extends AppCompatActivity {
 
         player.addListener(new Player.Listener() {
             @Override
+            public void onAudioSessionIdChanged(int audioSessionId) {
+                attachLoudnessEnhancer(audioSessionId);
+            }
+
+            @Override
             public void onPlaybackStateChanged(int state) {
                 bufferingView.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                if (state == Player.STATE_READY && !didInitialSeek && session.startTime > 5) {
-                    didInitialSeek = true;
-                    player.seekTo((long) (session.startTime * 1000));
+                if (state == Player.STATE_READY) {
+                    if (loudnessEnhancer == null) attachLoudnessEnhancer(player.getAudioSessionId());
+                    if (!didInitialSeek && session.startTime > 5) {
+                        didInitialSeek = true;
+                        player.seekTo((long) (session.startTime * 1000));
+                    }
                 }
                 if (state == Player.STATE_ENDED) {
                     persistProgress();
@@ -549,7 +786,7 @@ public final class PlayerActivity extends AppCompatActivity {
     }
 
     private void updateSubtitleMargin() {
-        android.widget.FrameLayout.LayoutParams lp = (android.widget.FrameLayout.LayoutParams) cinemaSubText.getLayoutParams();
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) cinemaSubText.getLayoutParams();
         lp.bottomMargin = UiHelper.dp(this, controlsVisible ? 96 : 26);
         cinemaSubText.setLayoutParams(lp);
     }
@@ -581,6 +818,7 @@ public final class PlayerActivity extends AppCompatActivity {
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         persistProgress();
+        releaseLoudnessEnhancer();
         if (player != null) {
             player.release();
             player = null;

@@ -12,7 +12,7 @@ Runs directly on your Android phone or tablet over local BDIX / ISP Wi-Fi with z
   - `AppDatabase.java`: Native Android SQLite (`SQLiteOpenHelper`) with WAL mode, FTS5 full-text search, cross-server zero-duplicate highest-quality merging, Watchlist, and Watch History.
   - `H5aiService.java`, `IccService.java`, `CircleFtpService.java`: Direct parallel crawlers and delta sync clients for DhakaFlix, ICC FTP, CircleFTP, and DiscoveryFTP.
   - `MetadataService.java`: Multi-edition hydration across all 4 servers plus TVMaze, IMDb, and Wikipedia enrichment.
-  - `UpdateService.java`: HTTPS-only version-control auto-update engine reading `public release/version.json` (including `accessControl` mandatory update enforcement) with GitHub Releases fallback.
+  - `UpdateService.java`: HTTPS-only version-control auto-update engine reading the embedded release `version.json` every 60 minutes in the background (hidden from the frontend UI), supporting 3-second update popups, manual checks, and `accessControl` mandatory locks.
   - `MediaRepository.java`: Parallel 4-server delta sync coordinator, background auto-sync scheduler, and recents-first Home feed builder.
 - **UI Layer (`app/src/main/java/com/cinevault/app/ui/`):**
   - `MainActivity.java`: Edge-to-edge WindowInsets-aware shell hosting Recents-first Home (Hero Spotlight, Continue Watching, 12 category carousels), Movies and TV & Anime Browse with Collapsible Unified Filter Panel, instant FTS5 Search, My List (Recently Watched + Saved Watchlist), and the dedicated **Servers** menu bar tab (Library stats, Sync New / Full Rescan, Auto-Sync toggle & interval, live 10-node Server Health monitor, ICC FTP session setup, and Public Release Version Control updater).

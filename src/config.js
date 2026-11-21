@@ -19,7 +19,7 @@ export const DHAKAFLIX_ORIGINS = new Set([
 ]);
 
 export const ICC_ORIGIN = "http://10.16.100.244";
-export const DEFAULT_ICC_SESSION = process.env.ICC_SESSION || "";
+export const DEFAULT_ICC_SESSION = process.env.ICC_SESSION || "cinevault";
 
 export const CIRCLEFTP_ORIGIN = "http://new.circleftp.net";
 export const CIRCLEFTP_API = "http://new.circleftp.net:5000/api";

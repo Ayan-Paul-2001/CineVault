@@ -51,29 +51,79 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS watch_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL DEFAULT 'default',
     media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-    file_url TEXT UNIQUE NOT NULL,
+    file_url TEXT NOT NULL,
     file_name TEXT,
     season_name TEXT,
     episode_label TEXT,
     position REAL DEFAULT 0,
     duration REAL DEFAULT 0,
     completed INTEGER DEFAULT 0,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    UNIQUE(device_id, file_url)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_history_updated ON watch_history(updated_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_history_media ON watch_history(media_id);
-
   CREATE TABLE IF NOT EXISTS watchlist (
-    media_id INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
-    added_at INTEGER NOT NULL
+    device_id TEXT NOT NULL DEFAULT 'default',
+    media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (device_id, media_id)
   );
 
   CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT
   );
+`);
+
+// Safe online schema migration for per-device watch_history & watchlist isolation
+const histCols = new Set(db.prepare("PRAGMA table_info(watch_history)").all().map((c) => c.name));
+if (!histCols.has("device_id")) {
+  db.exec(`
+    BEGIN;
+    CREATE TABLE watch_history_v2 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id TEXT NOT NULL DEFAULT 'default',
+      media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+      file_url TEXT NOT NULL,
+      file_name TEXT,
+      season_name TEXT,
+      episode_label TEXT,
+      position REAL DEFAULT 0,
+      duration REAL DEFAULT 0,
+      completed INTEGER DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(device_id, file_url)
+    );
+    INSERT OR IGNORE INTO watch_history_v2 (device_id, media_id, file_url, file_name, season_name, episode_label, position, duration, completed, updated_at)
+    SELECT 'default', media_id, file_url, file_name, season_name, episode_label, position, duration, completed, updated_at FROM watch_history;
+    DROP TABLE watch_history;
+    ALTER TABLE watch_history_v2 RENAME TO watch_history;
+    COMMIT;
+  `);
+}
+const wlCols = new Set(db.prepare("PRAGMA table_info(watchlist)").all().map((c) => c.name));
+if (!wlCols.has("device_id")) {
+  db.exec(`
+    BEGIN;
+    CREATE TABLE watchlist_v2 (
+      device_id TEXT NOT NULL DEFAULT 'default',
+      media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (device_id, media_id)
+    );
+    INSERT OR IGNORE INTO watchlist_v2 (device_id, media_id, added_at)
+    SELECT 'default', media_id, added_at FROM watchlist;
+    DROP TABLE watchlist;
+    ALTER TABLE watchlist_v2 RENAME TO watchlist;
+    COMMIT;
+  `);
+}
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_history_device_updated ON watch_history(device_id, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_history_media ON watch_history(media_id);
+  CREATE INDEX IF NOT EXISTS idx_watchlist_device ON watchlist(device_id, added_at DESC);
 `);
 
 // Safe online schema migration for existing CineVault databases (preserves all watchlist & watch history!)
@@ -342,8 +392,8 @@ export function runDeduplication() {
   `);
 
   const stmtMigrateWatchlist = db.prepare(`
-    INSERT OR IGNORE INTO watchlist(media_id, added_at)
-    SELECT ?, added_at FROM watchlist WHERE media_id = ?
+    INSERT OR IGNORE INTO watchlist(device_id, media_id, added_at)
+    SELECT device_id, ?, added_at FROM watchlist WHERE media_id = ?
   `);
   const stmtDeleteOldWatchlist = db.prepare(`DELETE FROM watchlist WHERE media_id = ?`);
 
@@ -590,6 +640,11 @@ export function getLibraryStats(force = false) {
   return cachedStats;
 }
 
+export function normalizeDeviceId(raw) {
+  const s = String(raw || "").trim();
+  return /^[a-zA-Z0-9_-]{8,64}$/.test(s) ? s : "default";
+}
+
 export function queryItems({
   q = "",
   category = "",
@@ -603,7 +658,9 @@ export function queryItems({
   sort = "recent",
   page = 1,
   limit = 36,
+  deviceId = "default",
 } = {}) {
+  const safeDevice = normalizeDeviceId(deviceId);
   const where = ["m.is_primary = 1"];
   const params = [];
   let fromSql = "FROM media_items m";
@@ -702,12 +759,12 @@ export function queryItems({
            m.year, m.quality, m.audio_tags, m.source_tag, m.language_tag,
            m.imdb_rank, m.modified_at, m.poster_url, m.poster_checked,
            m.source, m.quality_score,
-           EXISTS(SELECT 1 FROM watchlist w WHERE w.media_id = m.id) AS in_watchlist
+           EXISTS(SELECT 1 FROM watchlist w WHERE w.device_id = ? AND w.media_id = m.id) AS in_watchlist
     ${fromSql}
     ${whereSql}
     ${orderSql}
     LIMIT ? OFFSET ?
-  `).all(...params, safeLimit, offset);
+  `).all(safeDevice, ...params, safeLimit, offset);
 
   return {
     items: rows,
@@ -718,59 +775,66 @@ export function queryItems({
   };
 }
 
-// Watchlist operations
-export function toggleWatchlist(mediaId) {
+// Per-device Watchlist operations
+export function toggleWatchlist(mediaId, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   const item = getItemById(mediaId);
   const id = item?.canonical_id || Number(mediaId);
-  const existing = db.prepare("SELECT media_id FROM watchlist WHERE media_id = ?").get(id);
+  const existing = db.prepare("SELECT media_id FROM watchlist WHERE device_id = ? AND media_id = ?").get(safeDevice, id);
   if (existing) {
-    db.prepare("DELETE FROM watchlist WHERE media_id = ?").run(id);
+    db.prepare("DELETE FROM watchlist WHERE device_id = ? AND media_id = ?").run(safeDevice, id);
     return { inWatchlist: false };
   }
-  db.prepare("INSERT INTO watchlist(media_id, added_at) VALUES (?, ?)").run(id, Date.now());
+  db.prepare("INSERT OR REPLACE INTO watchlist(device_id, media_id, added_at) VALUES (?, ?, ?)").run(safeDevice, id, Date.now());
   return { inWatchlist: true };
 }
 
-export function getWatchlist() {
+export function getWatchlist(deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   return db.prepare(`
     SELECT m.id, m.url, m.category, m.media_type, m.sub_group, m.title, m.raw_name,
            m.year, m.quality, m.audio_tags, m.source_tag, m.language_tag,
            m.imdb_rank, m.modified_at, m.poster_url, m.source, 1 AS in_watchlist, w.added_at
     FROM watchlist w
     JOIN media_items m ON m.id = w.media_id
+    WHERE w.device_id = ?
     ORDER BY w.added_at DESC
-  `).all();
+  `).all(safeDevice);
 }
 
-export function removeFromWatchlist(mediaId) {
+export function removeFromWatchlist(mediaId, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   const item = getItemById(mediaId);
   const canonId = item?.canonical_id || Number(mediaId);
   db.prepare(`
     DELETE FROM watchlist
-    WHERE media_id = ? OR media_id IN (SELECT id FROM media_items WHERE canonical_id = ?)
-  `).run(Number(mediaId), canonId);
+    WHERE device_id = ? AND (media_id = ? OR media_id IN (SELECT id FROM media_items WHERE canonical_id = ?))
+  `).run(safeDevice, Number(mediaId), canonId);
   return { ok: true };
 }
 
-export function clearWatchlist() {
-  db.prepare("DELETE FROM watchlist").run();
+export function clearWatchlist(deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
+  db.prepare("DELETE FROM watchlist WHERE device_id = ?").run(safeDevice);
   return { ok: true };
 }
 
-// Watch history / Continue Watching
-export function upsertWatchProgress({ mediaId, fileUrl, fileName, seasonName, episodeLabel, position, duration }) {
+// Per-device Watch history / Continue Watching
+export function upsertWatchProgress({ mediaId, fileUrl, fileName, seasonName, episodeLabel, position, duration, deviceId = "default" }) {
+  const safeDevice = normalizeDeviceId(deviceId);
   const pos = Math.max(0, Number(position) || 0);
   const dur = Math.max(0, Number(duration) || 0);
   const completed = dur > 60 && pos / dur >= 0.92 ? 1 : 0;
   db.prepare(`
-    INSERT INTO watch_history (media_id, file_url, file_name, season_name, episode_label, position, duration, completed, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(file_url) DO UPDATE SET
+    INSERT INTO watch_history (device_id, media_id, file_url, file_name, season_name, episode_label, position, duration, completed, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(device_id, file_url) DO UPDATE SET
       position = excluded.position,
       duration = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE watch_history.duration END,
       completed = excluded.completed,
       updated_at = excluded.updated_at
   `).run(
+    safeDevice,
     Number(mediaId),
     fileUrl,
     fileName || null,
@@ -784,7 +848,8 @@ export function upsertWatchProgress({ mediaId, fileUrl, fileName, seasonName, ep
   return { ok: true, completed };
 }
 
-export function getContinueWatching(limit = 20) {
+export function getContinueWatching(limit = 20, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   const rows = db.prepare(`
     SELECT h.id AS history_id, h.file_url, h.file_name, h.season_name, h.episode_label,
            h.position, h.duration, h.completed, h.updated_at,
@@ -805,10 +870,10 @@ export function getContinueWatching(limit = 20) {
     FROM watch_history h
     JOIN media_items m ON m.id = h.media_id
     LEFT JOIN media_items p ON p.id = m.canonical_id
-    WHERE h.position > 5
+    WHERE h.device_id = ? AND h.position > 5
     ORDER BY h.updated_at DESC
     LIMIT 100
-  `).all();
+  `).all(safeDevice);
 
   const seen = new Set();
   const deduped = [];
@@ -821,34 +886,38 @@ export function getContinueWatching(limit = 20) {
   return deduped;
 }
 
-export function getItemWatchHistory(mediaId) {
+export function getItemWatchHistory(mediaId, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   const item = getItemById(mediaId);
   const canonId = item?.canonical_id || Number(mediaId);
   return db.prepare(`
     SELECT h.file_url, h.file_name, h.season_name, h.episode_label, h.position, h.duration, h.completed, h.updated_at
     FROM watch_history h
     JOIN media_items m ON m.id = h.media_id
-    WHERE m.id = ? OR m.canonical_id = ?
+    WHERE h.device_id = ? AND (m.id = ? OR m.canonical_id = ?)
     ORDER BY h.updated_at DESC
-  `).all(Number(mediaId), canonId);
+  `).all(safeDevice, Number(mediaId), canonId);
 }
 
-export function removeWatchHistory(fileUrl) {
-  db.prepare("DELETE FROM watch_history WHERE file_url = ?").run(fileUrl);
+export function removeWatchHistory(fileUrl, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
+  db.prepare("DELETE FROM watch_history WHERE device_id = ? AND file_url = ?").run(safeDevice, fileUrl);
 }
 
-export function removeMediaWatchHistory(mediaId) {
+export function removeMediaWatchHistory(mediaId, deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
   const item = getItemById(mediaId);
   const canonId = item?.canonical_id || Number(mediaId);
   db.prepare(`
     DELETE FROM watch_history
-    WHERE media_id = ? OR media_id IN (SELECT id FROM media_items WHERE canonical_id = ?)
-  `).run(Number(mediaId), canonId);
+    WHERE device_id = ? AND (media_id = ? OR media_id IN (SELECT id FROM media_items WHERE canonical_id = ?))
+  `).run(safeDevice, Number(mediaId), canonId);
   return { ok: true };
 }
 
-export function clearWatchHistory() {
-  db.prepare("DELETE FROM watch_history").run();
+export function clearWatchHistory(deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
+  db.prepare("DELETE FROM watch_history WHERE device_id = ?").run(safeDevice);
   return { ok: true };
 }
 

@@ -16,8 +16,6 @@ import { apiGet, apiPost, formatRelativeDate } from "../api.js";
 export default function SyncDrawer({ sync, stats, onClose, onTriggerSync, onNotify }) {
   const [health, setHealth] = useState(null);
   const [checking, setChecking] = useState(false);
-  const [iccInput, setIccInput] = useState("");
-  const [savingIcc, setSavingIcc] = useState(false);
 
   const loadHealth = async (force = false) => {
     setChecking(true);
@@ -38,22 +36,6 @@ export default function SyncDrawer({ sync, stats, onClose, onTriggerSync, onNoti
       onNotify("Auto-sync settings updated");
     } catch (e) {
       onNotify("Failed to update settings: " + e.message);
-    }
-  };
-
-  const saveIccSession = async () => {
-    if (!iccInput.trim()) return;
-    setSavingIcc(true);
-    try {
-      await apiPost("/api/sync/icc-session", { session: iccInput.trim() });
-      setIccInput("");
-      onNotify("ICC FTP session updated! Starting sync...");
-      loadHealth(true);
-      onTriggerSync("icc");
-    } catch (e) {
-      onNotify(e.message);
-    } finally {
-      setSavingIcc(false);
     }
   };
 
@@ -289,30 +271,6 @@ export default function SyncDrawer({ sync, stats, onClose, onTriggerSync, onNoti
               CircleFTP, and CineVault will auto-sync them once they return online).
             </div>
           )}
-
-          {/* ICC Session Token Updater */}
-          <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              ICC FTP Session (active: <code>{health?.iccSessionPreview || "configured"}</code>)
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                type="text"
-                className="filter-select"
-                style={{ flex: 1, fontSize: 12 }}
-                placeholder="Paste new ICC dashboard.php?session=... URL"
-                value={iccInput}
-                onChange={(e) => setIccInput(e.target.value)}
-              />
-              <button
-                className="btn btn-glass btn-sm"
-                disabled={savingIcc || !iccInput.trim()}
-                onClick={saveIccSession}
-              >
-                Save
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

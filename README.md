@@ -166,9 +166,9 @@ See [`android-app/README.md`](android-app/README.md) for keystore signing instru
 Public Android releases and version-control update metadata live in the dedicated [`public release/`](public%20release/README.md) folder.
 
 ### How In-App Auto-Update Works
-1. **Version-Control Manifest (`public release/version.json`):** CineVault fetches `https://raw.githubusercontent.com/<owner>/<repo>/main/public%20release/version.json` (or a direct HTTPS raw `version.json` URL configured in the **Servers** tab) and compares `appVersion`, `appVersionCode`, and `accessControl`.
-2. **Optional & Mandatory Updates (`accessControl`):** Supports normal update banners as well as mandatory update locks (`forceUpdateEnabled`, `forceAppUpdate`, `minAppVersion`, `lockTitle`, `lockMessage`).
-3. **Play-Protect-Safe Installation:** Verifies that the `apkPackage` (`CineVault.apk`) download URL belongs strictly to `https://github.com/` or `https://*.githubusercontent.com/`, displays the changelog and SHA-256 checksum, and opens the download in Android's system browser and standard package installer.
+1. **Embedded Version-Control Manifest (`version.json`):** The public release endpoint is embedded internally in the app (hidden from the frontend UI) and checks `version.json` over HTTPS automatically in the background every **60 minutes**.
+2. **3-Second Popup & Manual Check:** When a new version is published, CineVault displays a **3-second update popup** and keeps the download option available under **Servers -> App Updates**, where users can also tap **Check for Updates** manually anytime.
+3. **Optional & Mandatory Updates (`accessControl`):** Supports both optional updates and mandatory locks (`forceUpdateEnabled`, `forceAppUpdate`, `minAppVersion`, `lockTitle`, `lockMessage`), handing off the verified HTTPS `CineVault.apk` download cleanly to Android's system browser.
 
 ### Publishing a New Release
 

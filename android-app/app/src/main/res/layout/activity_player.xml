@@ -13,7 +13,15 @@
         app:resize_mode="fit"
         app:use_controller="false" />
 
-    <!-- Custom Cinema Subtitle Overlay (supports live size + timing sync offset!) -->
+    <!-- Full-screen VLC-style Gesture Surface (Left = Brightness, Right = Volume + 200% Boost, Tap = Toggle UI) -->
+    <View
+        android:id="@+id/player_gesture_layer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <!-- Custom Cinema Subtitle Overlay (supports live size + timing sync offset) -->
     <TextView
         android:id="@+id/cinema_subtitle_text"
         android:layout_width="wrap_content"
@@ -32,6 +40,61 @@
         android:textSize="20sp"
         android:textStyle="bold"
         android:visibility="gone" />
+
+    <!-- VLC-Style Brightness / Volume Boost Vertical Slider HUD -->
+    <LinearLayout
+        android:id="@+id/player_gesture_hud"
+        android:layout_width="76dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/bg_card_rounded"
+        android:elevation="8dp"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="14dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/gesture_hud_icon"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:contentDescription="Level"
+            android:src="@drawable/ic_brightness" />
+
+        <FrameLayout
+            android:id="@+id/gesture_bar_track"
+            android:layout_width="8dp"
+            android:layout_height="120dp"
+            android:layout_marginVertical="10dp"
+            android:background="#33FFFFFF">
+
+            <View
+                android:id="@+id/gesture_bar_fill"
+                android:layout_width="match_parent"
+                android:layout_height="60dp"
+                android:layout_gravity="bottom"
+                android:background="#F59E0B" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/gesture_hud_percent"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="100%"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/gesture_hud_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="Volume"
+            android:textColor="@color/cv_text_muted"
+            android:textSize="10.5sp" />
+    </LinearLayout>
 
     <ProgressBar
         android:id="@+id/player_buffering"
@@ -52,6 +115,8 @@
             android:layout_height="wrap_content"
             android:layout_gravity="top"
             android:background="#BB000000"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingHorizontal="12dp"
@@ -115,9 +180,9 @@
                 android:id="@+id/btn_player_rew"
                 android:layout_width="54dp"
                 android:layout_height="54dp"
-                android:background="#66000000"
+                android:background="@drawable/bg_circle_dark"
                 android:contentDescription="Rewind 10s"
-                android:padding="10dp"
+                android:padding="12dp"
                 android:src="@drawable/ic_replay_10"
                 app:tint="#FFFFFF" />
 
@@ -126,9 +191,9 @@
                 android:layout_width="68dp"
                 android:layout_height="68dp"
                 android:layout_marginHorizontal="26dp"
-                android:background="#88E50914"
+                android:background="@drawable/bg_circle_accent"
                 android:contentDescription="Play or Pause"
-                android:padding="14dp"
+                android:padding="16dp"
                 android:src="@drawable/ic_pause"
                 app:tint="#FFFFFF" />
 
@@ -136,9 +201,9 @@
                 android:id="@+id/btn_player_fwd"
                 android:layout_width="54dp"
                 android:layout_height="54dp"
-                android:background="#66000000"
+                android:background="@drawable/bg_circle_dark"
                 android:contentDescription="Forward 10s"
-                android:padding="10dp"
+                android:padding="12dp"
                 android:src="@drawable/ic_forward_10"
                 app:tint="#FFFFFF" />
         </LinearLayout>
@@ -149,6 +214,8 @@
             android:layout_height="wrap_content"
             android:layout_gravity="bottom"
             android:background="#CC000000"
+            android:clickable="true"
+            android:focusable="true"
             android:orientation="vertical"
             android:paddingHorizontal="16dp"
             android:paddingVertical="10dp">

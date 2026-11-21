@@ -1,5 +1,27 @@
+const DEVICE_ID_KEY = "cinevault_device_id";
+
+export function getDeviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_ID_KEY);
+    if (!id || !/^[a-zA-Z0-9_-]{8,64}$/.test(id)) {
+      id =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+      localStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return "default";
+  }
+}
+
+function deviceHeaders(extra = {}) {
+  return { "X-CineVault-Device-Id": getDeviceId(), ...extra };
+}
+
 export async function apiGet(path) {
-  const res = await fetch(path);
+  const res = await fetch(path, { headers: deviceHeaders() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `HTTP ${res.status}`);
@@ -10,7 +32,7 @@ export async function apiGet(path) {
 export async function apiPost(path, body = {}) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: deviceHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -21,7 +43,7 @@ export async function apiPost(path, body = {}) {
 }
 
 export async function apiDelete(path) {
-  const res = await fetch(path, { method: "DELETE" });
+  const res = await fetch(path, { method: "DELETE", headers: deviceHeaders() });
   return res.json().catch(() => ({}));
 }
 

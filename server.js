@@ -96,63 +96,76 @@ function invalidateHomeCache() {
   cachedHome = null;
 }
 
-function buildHomePayload() {
-  if (cachedHome && Date.now() - cachedHomeAt < 4000) {
-    return { ...cachedHome, sync: getSyncStatus() };
-  }
-  const continueWatching = getContinueWatching(24);
-  const recentlyAdded = queryItems({ sort: "recent", limit: 36 }).items;
-  const latestMovies = queryItems({ mediaType: "movie", sort: "recent", limit: 36 }).items;
-  const latestSeries = queryItems({ mediaType: "series", sort: "recent", limit: 36 }).items;
-  const latest2026 = queryItems({ year: 2026, mediaType: "movie", sort: "recent", limit: 36 }).items;
-  const uhd4k = queryItems({ category: "4k-movies", sort: "recent", limit: 36 }).items;
-  const hindi = queryItems({ category: "hindi", sort: "recent", limit: 36 }).items;
-  const southIndian = queryItems({ category: "south-indian,south-dubbed", sort: "recent", limit: 36 }).items;
-  const koreanSeries = queryItems({ category: "korean-series", sort: "recent", limit: 36 }).items;
-  const anime = queryItems({ category: "anime", sort: "recent", limit: 36 }).items;
-  const animation = queryItems({ category: "animation-1080p,animation", sort: "recent", limit: 36 }).items;
-  const documentary = queryItems({ category: "documentary", sort: "recent", limit: 36 }).items;
-  const imdbTop250 = queryItems({ category: "imdb-top-250", sort: "imdb", limit: 36 }).items;
+function getRequestDeviceId(req) {
+  const raw = String(req.headers["x-cinevault-device-id"] || "").trim();
+  return /^[a-zA-Z0-9_-]{8,64}$/.test(raw) ? raw : "default";
+}
 
-  // Curated hero spotlight: ALWAYS lead with the latest recently added HD/4K releases!
-  const heroPool = [
-    ...latest2026.filter((i) => i.quality === "4K" || i.quality === "1080p").slice(0, 3),
-    ...recentlyAdded.filter((i) => i.quality === "4K" || i.quality === "1080p").slice(0, 3),
-    ...latestSeries.slice(0, 2),
-    ...uhd4k.slice(0, 2),
-  ];
-  const heroSeen = new Set();
-  const hero = [];
-  for (const h of heroPool) {
-    if (!heroSeen.has(h.id)) {
-      heroSeen.add(h.id);
-      hero.push(h);
+function buildHomePayload(deviceId = "default") {
+  let shared = cachedHome;
+  if (!shared || Date.now() - cachedHomeAt >= 4000) {
+    const recentlyAdded = queryItems({ sort: "recent", limit: 36 }).items;
+    const latestMovies = queryItems({ mediaType: "movie", sort: "recent", limit: 36 }).items;
+    const latestSeries = queryItems({ mediaType: "series", sort: "recent", limit: 36 }).items;
+    const latest2026 = queryItems({ year: 2026, mediaType: "movie", sort: "recent", limit: 36 }).items;
+    const uhd4k = queryItems({ category: "4k-movies", sort: "recent", limit: 36 }).items;
+    const hindi = queryItems({ category: "hindi", sort: "recent", limit: 36 }).items;
+    const southIndian = queryItems({ category: "south-indian,south-dubbed", sort: "recent", limit: 36 }).items;
+    const koreanSeries = queryItems({ category: "korean-series", sort: "recent", limit: 36 }).items;
+    const anime = queryItems({ category: "anime", sort: "recent", limit: 36 }).items;
+    const animation = queryItems({ category: "animation-1080p,animation", sort: "recent", limit: 36 }).items;
+    const documentary = queryItems({ category: "documentary", sort: "recent", limit: 36 }).items;
+    const imdbTop250 = queryItems({ category: "imdb-top-250", sort: "imdb", limit: 36 }).items;
+
+    const heroPool = [
+      ...latest2026.filter((i) => i.quality === "4K" || i.quality === "1080p").slice(0, 3),
+      ...recentlyAdded.filter((i) => i.quality === "4K" || i.quality === "1080p").slice(0, 3),
+      ...latestSeries.slice(0, 2),
+      ...uhd4k.slice(0, 2),
+    ];
+    const heroSeen = new Set();
+    const hero = [];
+    for (const h of heroPool) {
+      if (!heroSeen.has(h.id)) {
+        heroSeen.add(h.id);
+        hero.push(h);
+      }
+      if (hero.length >= 6) break;
     }
-    if (hero.length >= 6) break;
+
+    shared = {
+      hero,
+      sections: [
+        { id: "recent", title: "Recently Added Across All Servers", subtitle: "Newest movies & series uploaded across all servers", filter: { sort: "recent" }, items: recentlyAdded },
+        { id: "latest-movies", title: "Latest Movies", subtitle: "Most recently uploaded movies in highest available quality", filter: { sort: "recent" }, items: latestMovies },
+        { id: "tv-series", title: "Latest TV, Web Series & Anime", subtitle: "Most recently updated series & episodes across all servers", filter: { sort: "recent" }, items: latestSeries },
+        { id: "latest-2026", title: "2026 New Releases", subtitle: "Newest 2026 releases sorted by latest uploads", filter: { year: 2026, sort: "recent" }, items: latest2026 },
+        { id: "4k-movies", title: "4K Ultra HD Collection", subtitle: "Latest 2160p UHD cinema (deduplicated)", filter: { category: "4k-movies", sort: "recent" }, items: uhd4k },
+        { id: "hindi", title: "Bollywood & Hindi Cinema", subtitle: "Latest Hindi uploads first", filter: { category: "hindi", sort: "recent" }, items: hindi },
+        { id: "south", title: "South Indian Blockbusters", subtitle: "Latest Tamil, Telugu, Malayalam & Hindi Dubbed", filter: { category: "south-indian,south-dubbed", sort: "recent" }, items: southIndian },
+        { id: "korean-series", title: "Korean TV & Web Series", subtitle: "Latest K-Dramas & originals", filter: { category: "korean-series", sort: "recent" }, items: koreanSeries },
+        { id: "anime", title: "Anime & Cartoon Series", subtitle: "Latest Dual & Multi-Audio series", filter: { category: "anime", sort: "recent" }, items: anime },
+        { id: "animation", title: "Animation Movies", subtitle: "Latest 4K & 1080p animated features", filter: { category: "animation-1080p,animation", sort: "recent" }, items: animation },
+        { id: "documentary", title: "Documentaries", subtitle: "Latest real-world stories & specials", filter: { category: "documentary", sort: "recent" }, items: documentary },
+        { id: "imdb-top-250", title: "IMDb Top 250 Masterpieces", subtitle: "Best available quality (4K / 1080p)", filter: { category: "imdb-top-250", sort: "imdb" }, items: imdbTop250 },
+      ].filter((s) => s.items.length > 0),
+      stats: getLibraryStats(),
+    };
+    cachedHome = shared;
+    cachedHomeAt = Date.now();
   }
 
-  cachedHome = {
-    hero,
-    continueWatching,
-    sections: [
-      { id: "recent", title: "Recently Added Across All Servers", subtitle: "Newest movies & series uploaded across all servers", filter: { sort: "recent" }, items: recentlyAdded },
-      { id: "latest-movies", title: "Latest Movies", subtitle: "Most recently uploaded movies in highest available quality", filter: { sort: "recent" }, items: latestMovies },
-      { id: "tv-series", title: "Latest TV, Web Series & Anime", subtitle: "Most recently updated series & episodes across all servers", filter: { sort: "recent" }, items: latestSeries },
-      { id: "latest-2026", title: "2026 New Releases", subtitle: "Newest 2026 releases sorted by latest uploads", filter: { year: 2026, sort: "recent" }, items: latest2026 },
-      { id: "4k-movies", title: "4K Ultra HD Collection", subtitle: "Latest 2160p UHD cinema (deduplicated)", filter: { category: "4k-movies", sort: "recent" }, items: uhd4k },
-      { id: "hindi", title: "Bollywood & Hindi Cinema", subtitle: "Latest Hindi uploads first", filter: { category: "hindi", sort: "recent" }, items: hindi },
-      { id: "south", title: "South Indian Blockbusters", subtitle: "Latest Tamil, Telugu, Malayalam & Hindi Dubbed", filter: { category: "south-indian,south-dubbed", sort: "recent" }, items: southIndian },
-      { id: "korean-series", title: "Korean TV & Web Series", subtitle: "Latest K-Dramas & originals", filter: { category: "korean-series", sort: "recent" }, items: koreanSeries },
-      { id: "anime", title: "Anime & Cartoon Series", subtitle: "Latest Dual & Multi-Audio series", filter: { category: "anime", sort: "recent" }, items: anime },
-      { id: "animation", title: "Animation Movies", subtitle: "Latest 4K & 1080p animated features", filter: { category: "animation-1080p,animation", sort: "recent" }, items: animation },
-      { id: "documentary", title: "Documentaries", subtitle: "Latest real-world stories & specials", filter: { category: "documentary", sort: "recent" }, items: documentary },
-      { id: "imdb-top-250", title: "IMDb Top 250 Masterpieces", subtitle: "Best available quality (4K / 1080p)", filter: { category: "imdb-top-250", sort: "imdb" }, items: imdbTop250 },
-    ].filter((s) => s.items.length > 0),
-    stats: getLibraryStats(),
+  // Per-device private Watchlist flags & Continue Watching history
+  const deviceWlIds = new Set(getWatchlist(deviceId).map((w) => w.id));
+  const mapWl = (item) => ({ ...item, in_watchlist: deviceWlIds.has(item.id) ? 1 : 0 });
+
+  return {
+    hero: shared.hero.map(mapWl),
+    continueWatching: getContinueWatching(24, deviceId),
+    sections: shared.sections.map((s) => ({ ...s, items: s.items.map(mapWl) })),
+    stats: shared.stats,
     sync: getSyncStatus(),
   };
-  cachedHomeAt = Date.now();
-  return cachedHome;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -193,9 +206,10 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // 3. Home curated feed
+      // 3. Home curated feed (per-device private Continue Watching & Watchlist)
+      const deviceId = getRequestDeviceId(req);
       if (pathname === "/api/home" && method === "GET") {
-        return sendJson(res, buildHomePayload());
+        return sendJson(res, buildHomePayload(deviceId));
       }
 
       // 4. Browse / Search / Filter (100% deduplicated highest-quality catalog)
@@ -214,6 +228,7 @@ const server = http.createServer(async (req, res) => {
           sort: p.get("sort") || (p.get("q") ? "relevance" : "recent"),
           page: p.get("page") || 1,
           limit: p.get("limit") || 36,
+          deviceId,
         });
         return sendJson(res, result);
       }
@@ -256,8 +271,8 @@ const server = http.createServer(async (req, res) => {
         item = getItemById(id);
         const files = safeJson(item.files_json, []);
         const seasons = safeJson(item.seasons_json, []);
-        const history = getItemWatchHistory(id);
-        const wl = getWatchlist().some((w) => w.id === (item.canonical_id || id));
+        const history = getItemWatchHistory(id, deviceId);
+        const wl = getWatchlist(deviceId).some((w) => w.id === (item.canonical_id || id));
 
         // If primary edition lacked ICC plot/director/trailer but one of the merged ICC editions has it, pull it in!
         let mergedMeta = { ...(enrichedMeta || {}) };
@@ -443,49 +458,44 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // 15. Watchlist
+      // 15. Per-Device Watchlist
       if (pathname === "/api/watchlist" && method === "GET") {
-        return sendJson(res, { items: getWatchlist() });
+        return sendJson(res, { items: getWatchlist(deviceId) });
       }
       if (pathname === "/api/watchlist" && method === "DELETE") {
-        clearWatchlist();
-        invalidateHomeCache();
+        clearWatchlist(deviceId);
         return sendJson(res, { ok: true });
       }
       const wlMatch = pathname.match(/^\/api\/watchlist\/(\d+)$/);
       if (wlMatch && method === "POST") {
-        invalidateHomeCache();
-        return sendJson(res, toggleWatchlist(Number(wlMatch[1])));
+        return sendJson(res, toggleWatchlist(Number(wlMatch[1]), deviceId));
       }
       if (wlMatch && method === "DELETE") {
-        removeFromWatchlist(Number(wlMatch[1]));
-        invalidateHomeCache();
+        removeFromWatchlist(Number(wlMatch[1]), deviceId);
         return sendJson(res, { ok: true, inWatchlist: false });
       }
 
-      // 16. Watch Progress / Continue Watching
+      // 16. Per-Device Watch Progress / Continue Watching
       if (pathname === "/api/history" && method === "GET") {
-        return sendJson(res, { items: getContinueWatching(40) });
+        return sendJson(res, { items: getContinueWatching(40, deviceId) });
       }
       if (pathname === "/api/history" && method === "DELETE") {
         const all = reqUrl.searchParams.get("all");
         const mediaId = reqUrl.searchParams.get("mediaId");
         const fileUrl = reqUrl.searchParams.get("fileUrl");
         if (all === "1" || (!mediaId && !fileUrl)) {
-          clearWatchHistory();
+          clearWatchHistory(deviceId);
         } else if (mediaId) {
-          removeMediaWatchHistory(Number(mediaId));
+          removeMediaWatchHistory(Number(mediaId), deviceId);
         } else if (fileUrl) {
-          removeWatchHistory(fileUrl);
+          removeWatchHistory(fileUrl, deviceId);
         }
-        invalidateHomeCache();
         return sendJson(res, { ok: true });
       }
       if (pathname === "/api/progress" && method === "POST") {
         const body = await readJsonBody(req);
         if (!body.mediaId || !body.fileUrl) return sendJson(res, { error: "Missing fields" }, 400);
-        invalidateHomeCache();
-        return sendJson(res, upsertWatchProgress(body));
+        return sendJson(res, upsertWatchProgress({ ...body, deviceId }));
       }
 
       // 17. Sync Controls, ICC Session Updater, Auto-Sync Settings & SSE Progress Stream

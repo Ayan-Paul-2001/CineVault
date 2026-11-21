@@ -18,6 +18,7 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
@@ -43,10 +44,12 @@ import com.google.android.material.chip.ChipGroup;
 import com.google.android.material.materialswitch.MaterialSwitch;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 
@@ -68,6 +71,9 @@ public final class MainActivity extends AppCompatActivity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private int currentTab = 0; // 0: Home, 1: Movies, 2: TV & Anime, 3: My List, 4: Search, 5: Servers
+    private final Deque<Integer> tabBackStack = new ArrayDeque<>();
+    private boolean isPoppingBackStack = false;
+    private long lastHomeBackPressMs = 0L;
     private boolean searchOpen = false;
     private boolean filtersExpanded = false;
     private boolean suppressSpinnerEvents = false;
@@ -81,7 +87,7 @@ public final class MainActivity extends AppCompatActivity {
     private String confirmClearTarget = null;
     private String lastLiveIccSearchQuery = "";
 
-    // Top bar & update banner
+    // Top bar & 3-second update popup
     private View topAppBar;
     private View brandContainer;
     private EditText searchInput;
@@ -90,7 +96,7 @@ public final class MainActivity extends AppCompatActivity {
     private TextView syncChipText;
     private ProgressBar topSyncProgress;
     private View updateBanner;
-    private TextView updateBannerText;
+    private TextView updateBannerText, updateBannerSub;
 
     // Tab views
     private SwipeRefreshLayout homeSwipe;
@@ -127,18 +133,38 @@ public final class MainActivity extends AppCompatActivity {
     private MaterialButton btnClearHistory, btnClearWatchlist;
     private MediaCardAdapter myListHistoryAdapter, myListWlAdapter;
 
-    // Dedicated Servers, Health, Auto-Sync & Public Release Updates widgets
+    // Dedicated Servers, Health, Auto-Sync & App Updates widgets
     private TextView srvStatsSummary, srvStatsDups, srvStatsSources, srvSyncLabel, srvSyncErrors;
     private ProgressBar srvSyncBar;
     private MaterialButton btnSrvSyncQuick, btnSrvSyncFull, btnSrvPingAll;
-    private TextView srvLastSyncText, srvIccStatusBadge, srvAppVersion, srvUpdateStatus, srvUpdateNotes;
+    private TextView srvLastSyncText, srvAppVersion, srvUpdateStatus, srvUpdateNotes;
     private MaterialSwitch switchAutoSync;
     private Spinner spinAutoSyncInterval;
     private LinearLayout srvHealthList;
-    private EditText inputSrvIccSession, inputSrvUpdateRepo;
-    private MaterialButton btnSrvOpenIcc, btnSrvSaveIcc, btnSrvSaveRepo, btnSrvCheckUpdates, btnSrvDownloadUpdate;
+    private MaterialButton btnSrvCheckUpdates, btnSrvDownloadUpdate;
 
     private Runnable pendingSearchRunnable;
+
+    private final Runnable hideUpdatePopupRunnable = () -> {
+        if (updateBanner != null && updateBanner.getVisibility() == View.VISIBLE) {
+            updateBanner.animate()
+                    .alpha(0f)
+                    .setDuration(220)
+                    .withEndAction(() -> {
+                        updateBanner.setVisibility(View.GONE);
+                        updateBanner.setAlpha(1f);
+                    })
+                    .start();
+        }
+    };
+
+    private final Runnable autoUpdateCheckRunnable = new Runnable() {
+        @Override
+        public void run() {
+            checkForUpdatesBackground(false);
+            uiHandler.postDelayed(this, UpdateService.AUTO_CHECK_INTERVAL_MS);
+        }
+    };
 
     private final Runnable heroRotateRunnable = new Runnable() {
         @Override
@@ -186,12 +212,14 @@ public final class MainActivity extends AppCompatActivity {
         applyEdgeToEdgeInsets();
         bindViews();
         setupListeners();
+        setupBackNavigation();
         app.repository.addSyncListener(syncListener);
 
         bootstrapCatalogAndHome();
-        checkUpdatesOnStartup();
+        checkForUpdatesBackground(true);
         uiHandler.postDelayed(heroRotateRunnable, 8000);
         uiHandler.postDelayed(autoSyncCheckRunnable, 60000);
+        uiHandler.postDelayed(autoUpdateCheckRunnable, UpdateService.AUTO_CHECK_INTERVAL_MS);
     }
 
     private void applyEdgeToEdgeInsets() {
@@ -221,6 +249,7 @@ public final class MainActivity extends AppCompatActivity {
         if (currentTab == 0) loadHome(false);
         else if (currentTab == 3) loadMyList();
         else if (currentTab == 5) loadServersTab(false);
+        checkForUpdatesBackground(true);
     }
 
     @Override
@@ -240,6 +269,7 @@ public final class MainActivity extends AppCompatActivity {
         topSyncProgress = findViewById(R.id.top_sync_progress);
         updateBanner = findViewById(R.id.update_banner);
         updateBannerText = findViewById(R.id.update_banner_text);
+        updateBannerSub = findViewById(R.id.update_banner_sub);
 
         homeSwipe = findViewById(R.id.home_swipe);
         browseContainer = findViewById(R.id.browse_container);
@@ -326,13 +356,7 @@ public final class MainActivity extends AppCompatActivity {
         spinAutoSyncInterval = findViewById(R.id.spin_auto_sync_interval);
         btnSrvPingAll = findViewById(R.id.btn_srv_ping_all);
         srvHealthList = findViewById(R.id.srv_health_list);
-        srvIccStatusBadge = findViewById(R.id.srv_icc_status_badge);
-        inputSrvIccSession = findViewById(R.id.input_srv_icc_session);
-        btnSrvOpenIcc = findViewById(R.id.btn_srv_open_icc);
-        btnSrvSaveIcc = findViewById(R.id.btn_srv_save_icc);
         srvAppVersion = findViewById(R.id.srv_app_version);
-        inputSrvUpdateRepo = findViewById(R.id.input_srv_update_repo);
-        btnSrvSaveRepo = findViewById(R.id.btn_srv_save_repo);
         btnSrvCheckUpdates = findViewById(R.id.btn_srv_check_updates);
         btnSrvDownloadUpdate = findViewById(R.id.btn_srv_download_update);
         srvUpdateStatus = findViewById(R.id.srv_update_status);
@@ -354,10 +378,17 @@ public final class MainActivity extends AppCompatActivity {
         homeSwipe.setColorSchemeColors(0xFFE50914);
         homeSwipe.setOnRefreshListener(() -> triggerSync("quick"));
 
-        findViewById(R.id.btn_update_banner_open).setOnClickListener(v -> {
+        View.OnClickListener openUpdateClick = v -> {
+            uiHandler.removeCallbacks(hideUpdatePopupRunnable);
+            updateBanner.setVisibility(View.GONE);
             if (availableUpdate != null) showUpdateDialog(availableUpdate);
+        };
+        updateBanner.setOnClickListener(openUpdateClick);
+        findViewById(R.id.btn_update_banner_open).setOnClickListener(openUpdateClick);
+        findViewById(R.id.btn_update_banner_close).setOnClickListener(v -> {
+            uiHandler.removeCallbacks(hideUpdatePopupRunnable);
+            updateBanner.setVisibility(View.GONE);
         });
-        findViewById(R.id.btn_update_banner_close).setOnClickListener(v -> updateBanner.setVisibility(View.GONE));
 
         btnSearchToggle.setOnClickListener(v -> {
             searchOpen = !searchOpen;
@@ -473,52 +504,56 @@ public final class MainActivity extends AppCompatActivity {
 
         btnSrvPingAll.setOnClickListener(v -> pingAllServersIntoTab());
 
-        btnSrvOpenIcc.setOnClickListener(v ->
-                UiHelper.openExternalBrowser(this, ServerConfig.ICC_ORIGIN + "/", false));
-
-        btnSrvSaveIcc.setOnClickListener(v -> {
-            String raw = inputSrvIccSession.getText().toString().trim();
-            if (raw.isEmpty()) {
-                Toast.makeText(this, "Paste your ICC dashboard.php?session=... URL or token first.", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            app.ioExecutor.execute(() -> {
-                try {
-                    app.repository.saveIccSession(raw);
-                    uiHandler.post(() -> {
-                        inputSrvIccSession.setText("");
-                        Toast.makeText(this, "ICC FTP session saved! Starting full ICC sync...", Toast.LENGTH_LONG).show();
-                        loadServersTab(true);
-                        triggerSync("quick");
-                    });
-                } catch (Exception e) {
-                    uiHandler.post(() -> Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show());
-                }
-            });
-        });
-
-        btnSrvSaveRepo.setOnClickListener(v -> {
-            String raw = inputSrvUpdateRepo.getText().toString().trim();
-            if (raw.isEmpty()) return;
-            app.ioExecutor.execute(() -> {
-                try {
-                    String saved = app.repository.saveGithubRepo(raw);
-                    uiHandler.post(() -> {
-                        inputSrvUpdateRepo.setText(saved);
-                        Toast.makeText(this, "Version control source saved: " + saved, Toast.LENGTH_SHORT).show();
-                        runManualUpdateCheck();
-                    });
-                } catch (Exception e) {
-                    uiHandler.post(() -> Toast.makeText(this, e.getMessage(), Toast.LENGTH_LONG).show());
-                }
-            });
-        });
-
         btnSrvCheckUpdates.setOnClickListener(v -> runManualUpdateCheck());
 
         btnSrvDownloadUpdate.setOnClickListener(v -> {
             if (availableUpdate != null) {
                 UiHelper.openExternalBrowser(this, availableUpdate.downloadUrl, true);
+            }
+        });
+    }
+
+    private void setupBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (searchOpen) {
+                    btnSearchToggle.performClick();
+                    return;
+                }
+                if ((currentTab == 1 || currentTab == 2 || currentTab == 4) && filtersExpanded) {
+                    filtersExpanded = false;
+                    filterBody.setVisibility(View.GONE);
+                    filterChevron.setText("Show");
+                    return;
+                }
+                if (!tabBackStack.isEmpty()) {
+                    int prev = tabBackStack.pop();
+                    isPoppingBackStack = true;
+                    switchTab(prev, "", "", "recent");
+                    isPoppingBackStack = false;
+                    return;
+                }
+                if (currentTab != 0) {
+                    isPoppingBackStack = true;
+                    switchTab(0, "", "", "recent");
+                    isPoppingBackStack = false;
+                    return;
+                }
+
+                long now = System.currentTimeMillis();
+                if (now - lastHomeBackPressMs <= 2500L) {
+                    lastHomeBackPressMs = 0L;
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Exit CineVault?")
+                            .setMessage("Are you sure you want to quit CineVault?")
+                            .setNegativeButton("Cancel", null)
+                            .setPositiveButton("Quit", (d, w) -> finishAffinity())
+                            .show();
+                } else {
+                    lastHomeBackPressMs = now;
+                    Toast.makeText(MainActivity.this, "Press back again to quit CineVault", Toast.LENGTH_SHORT).show();
+                }
             }
         });
     }
@@ -677,6 +712,17 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void switchTab(int tabIndex, String category, String year, String sort) {
+        if (!isPoppingBackStack && tabIndex != currentTab) {
+            if (tabIndex == 0) {
+                tabBackStack.clear();
+            } else if (currentTab != 4) {
+                if (tabBackStack.isEmpty() || tabBackStack.peek() != currentTab) {
+                    tabBackStack.push(currentTab);
+                    while (tabBackStack.size() > 20) tabBackStack.removeLast();
+                }
+            }
+        }
+        lastHomeBackPressMs = 0L;
         currentTab = tabIndex;
         if (tabIndex == 0) {
             bottomNav.getMenu().findItem(R.id.nav_home).setChecked(true);
@@ -729,7 +775,8 @@ public final class MainActivity extends AppCompatActivity {
                 homeSectionsAdapter.submitList(feed.sections);
 
                 if (initialBootstrap) {
-                    if (feed.stats.total == 0) {
+                    int iccCount = feed.stats.bySource.containsKey("icc") ? feed.stats.bySource.get("icc") : 0;
+                    if (feed.stats.total == 0 || iccCount < 500) {
                         triggerSync("full");
                     } else if (shouldAutoSync) {
                         triggerSync("quick");
@@ -828,8 +875,6 @@ public final class MainActivity extends AppCompatActivity {
             Models.LibraryStats st = app.repository.db.getLibraryStats(false);
             boolean autoEnabled = app.repository.isAutoSyncEnabled();
             int intervalMin = app.repository.getAutoSyncIntervalMinutes();
-            String savedRepo = app.repository.getGithubRepo();
-            boolean hasIccSession = !app.repository.getIccSession().isEmpty();
 
             uiHandler.post(() -> {
                 latestStats = st;
@@ -858,18 +903,6 @@ public final class MainActivity extends AppCompatActivity {
                 }
                 spinAutoSyncInterval.setSelection(selIdx);
                 suppressAutoSyncUiEvents = false;
-
-                if (hasIccSession) {
-                    srvIccStatusBadge.setText("Full Session Active");
-                    srvIccStatusBadge.setTextColor(0xFF22C55E);
-                } else {
-                    srvIccStatusBadge.setText("Basic Mode");
-                    srvIccStatusBadge.setTextColor(0xFFF59E0B);
-                }
-
-                if (inputSrvUpdateRepo.getText().toString().trim().isEmpty() && !savedRepo.isEmpty()) {
-                    inputSrvUpdateRepo.setText(savedRepo);
-                }
 
                 renderServersSyncProgress(app.repository.getSyncProgress());
                 if (availableUpdate != null) renderUpdateCard(availableUpdate);
@@ -956,9 +989,9 @@ public final class MainActivity extends AppCompatActivity {
             left.addView(name);
 
             TextView sub = new TextView(this);
-            String subTxt = h.node.origin + (h.reason != null && !h.reason.isEmpty() ? " · " + h.reason : "");
+            String subTxt = h.node.origin + (!h.online && h.reason != null && !h.reason.isEmpty() ? " · " + h.reason : "");
             sub.setText(subTxt);
-            sub.setTextColor(h.online && h.reason != null ? 0xFFF59E0B : 0xFF64748B);
+            sub.setTextColor(0xFF64748B);
             sub.setTextSize(11f);
             sub.setMaxLines(2);
             left.addView(sub);
@@ -967,10 +1000,7 @@ public final class MainActivity extends AppCompatActivity {
             status.setTextSize(11.5f);
             status.setTypeface(null, android.graphics.Typeface.BOLD);
             status.setPadding(UiHelper.dp(this, 8), 0, 0, 0);
-            if (h.online && h.reason != null && h.reason.startsWith("Basic Mode")) {
-                status.setText((h.latencyMs != null ? h.latencyMs : 0) + "ms Basic");
-                status.setTextColor(0xFFF59E0B);
-            } else if (h.online) {
+            if (h.online) {
                 status.setText((h.latencyMs != null ? h.latencyMs : 0) + "ms OK");
                 status.setTextColor(0xFF22C55E);
             } else if (h.node.optional) {
@@ -1020,29 +1050,20 @@ public final class MainActivity extends AppCompatActivity {
         btnSrvCheckUpdates.setEnabled(false);
         srvUpdateStatus.setVisibility(View.VISIBLE);
         srvUpdateStatus.setTextColor(0xFF94A3B8);
-        srvUpdateStatus.setText("Checking public release/version.json...");
+        srvUpdateStatus.setText("Checking for updates...");
         app.ioExecutor.execute(() -> {
-            String repo = app.repository.getGithubRepo();
-            if (!UpdateService.isValidRepoSlug(repo)) {
-                uiHandler.post(() -> {
-                    btnSrvCheckUpdates.setEnabled(true);
-                    srvUpdateStatus.setTextColor(0xFFF59E0B);
-                    srvUpdateStatus.setText("Enter your public GitHub owner/repo or raw public release/version.json URL above, then tap Save Source.");
-                });
-                return;
-            }
-            Models.AppUpdateInfo info = app.repository.updateService.checkForUpdate(repo);
-            app.repository.db.setSyncState("last_update_check_at", String.valueOf(System.currentTimeMillis()));
+            Models.AppUpdateInfo info = app.repository.updateService.checkForUpdate();
+            app.repository.markUpdateCheckedNow();
             uiHandler.post(() -> {
                 btnSrvCheckUpdates.setEnabled(true);
                 if (info != null) {
                     availableUpdate = info;
                     renderUpdateCard(info);
                     if (info.forceUpdate) showMandatoryUpdateLock(info);
-                    else if (info.hasUpdate) showUpdateBanner(info);
+                    else if (info.hasUpdate) showThreeSecondUpdatePopup(info);
                 } else {
                     srvUpdateStatus.setTextColor(0xFFF59E0B);
-                    srvUpdateStatus.setText("Could not reach public release/version.json for " + repo + ".");
+                    srvUpdateStatus.setText("Unable to check for updates right now. Please check your internet connection.");
                 }
             });
         });
@@ -1078,20 +1099,18 @@ public final class MainActivity extends AppCompatActivity {
         else syncChipText.setText(String.valueOf(tot));
     }
 
-    private void checkUpdatesOnStartup() {
+    private void checkForUpdatesBackground(boolean respectThrottle) {
         app.ioExecutor.execute(() -> {
-            String repo = app.repository.getGithubRepo();
-            if (!UpdateService.isValidRepoSlug(repo)) return;
-
-            Models.AppUpdateInfo info = app.repository.updateService.checkForUpdate(repo);
-            app.repository.db.setSyncState("last_update_check_at", String.valueOf(System.currentTimeMillis()));
-            if (info != null && info.hasUpdate) {
+            if (respectThrottle && !app.repository.isAutoUpdateCheckDue()) return;
+            Models.AppUpdateInfo info = app.repository.updateService.checkForUpdate();
+            app.repository.markUpdateCheckedNow();
+            if (info != null) {
                 uiHandler.post(() -> {
                     availableUpdate = info;
                     if (info.forceUpdate) {
                         showMandatoryUpdateLock(info);
-                    } else {
-                        showUpdateBanner(info);
+                    } else if (info.hasUpdate) {
+                        showThreeSecondUpdatePopup(info);
                     }
                     if (currentTab == 5) renderUpdateCard(info);
                 });
@@ -1099,9 +1118,17 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void showUpdateBanner(Models.AppUpdateInfo info) {
-        updateBannerText.setText("Update " + info.displayVersion + " available (" + info.apkPackage + ")");
+    private void showThreeSecondUpdatePopup(Models.AppUpdateInfo info) {
+        uiHandler.removeCallbacks(hideUpdatePopupRunnable);
+        updateBannerText.setText("New Update Available · " + info.displayVersion);
+        if (updateBannerSub != null) {
+            updateBannerSub.setText("Tap Update to install the latest CineVault release");
+        }
+        updateBanner.animate().cancel();
+        updateBanner.setAlpha(0f);
         updateBanner.setVisibility(View.VISIBLE);
+        updateBanner.animate().alpha(1f).setDuration(200).start();
+        uiHandler.postDelayed(hideUpdatePopupRunnable, 3000L);
     }
 
     private void showMandatoryUpdateLock(Models.AppUpdateInfo info) {
@@ -1130,13 +1157,13 @@ public final class MainActivity extends AppCompatActivity {
         msg.append(info.changelog);
         if (info.apkSizeBytes > 0) msg.append("\n\nAPK Size: ").append(Models.formatBytes(info.apkSizeBytes));
         if (info.sha256 != null && !info.sha256.isEmpty()) msg.append("\nSHA-256: ").append(info.sha256);
-        msg.append("\n\nOpens the verified HTTPS ").append(info.apkPackage).append(" download in your system browser.");
+        msg.append("\n\nDownloads the latest verified CineVault package in your browser.");
 
         new AlertDialog.Builder(this)
                 .setTitle("CineVault " + info.displayVersion + " Available")
                 .setMessage(msg.toString())
                 .setNegativeButton("Later", null)
-                .setPositiveButton("Download APK", (d, w) ->
+                .setPositiveButton("Download Update", (d, w) ->
                         UiHelper.openExternalBrowser(this, info.downloadUrl, true))
                 .show();
     }

@@ -124,38 +124,55 @@
         android:progressTint="@color/cv_sky"
         android:visibility="gone" />
 
-    <!-- Auto-Update Available Banner -->
+    <!-- 3-Second New Update Popup Banner (auto-dismisses after 3s) -->
     <LinearLayout
         android:id="@+id/update_banner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#10241A"
+        android:background="#0F291E"
+        android:elevation="6dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="14dp"
-        android:paddingVertical="8dp"
+        android:paddingVertical="10dp"
         android:visibility="gone">
 
-        <TextView
-            android:id="@+id/update_banner_text"
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/cv_text"
-            android:textSize="12.5sp"
-            android:textStyle="bold" />
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/update_banner_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/cv_text"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/update_banner_sub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Tap Update to install the latest CineVault release"
+                android:textColor="@color/cv_text_muted"
+                android:textSize="11.5sp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/btn_update_banner_open"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:paddingHorizontal="10dp"
-            android:paddingVertical="4dp"
+            android:paddingVertical="6dp"
             android:text="Update"
             android:textColor="@color/cv_green"
-            android:textSize="12.5sp"
+            android:textSize="13sp"
             android:textStyle="bold" />
 
         <ImageButton
@@ -756,7 +773,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="Manage DhakaFlix, ICC FTP, CircleFTP, DiscoveryFTP, background sync, and Public Release updates."
+                    android:text="Manage DhakaFlix, ICC FTP, CircleFTP, DiscoveryFTP, background auto-sync, and app updates."
                     android:textColor="@color/cv_text_muted"
                     android:textSize="12.5sp" />
 
@@ -972,7 +989,7 @@
                         android:orientation="vertical" />
                 </LinearLayout>
 
-                <!-- 4. ICC FTP Session Setup -->
+                <!-- 4. App Updates Card (embedded release source hidden from UI) -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -991,92 +1008,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="ICC FTP Full Catalog Session"
-                            android:textColor="@color/cv_text"
-                            android:textSize="14.5sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/srv_icc_status_badge"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Basic Mode"
-                            android:textColor="@color/cv_gold"
-                            android:textSize="11.5sp"
-                            android:textStyle="bold" />
-                    </LinearLayout>
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="ICC works in Basic Mode without a token. For all 40,000+ ICC titles (including full 4K catalog), open the ICC portal on BDIX Wi-Fi and paste your dashboard.php?session=... URL below."
-                        android:textColor="@color/cv_text_muted"
-                        android:textSize="12sp" />
-
-                    <EditText
-                        android:id="@+id/input_srv_icc_session"
-                        android:layout_width="match_parent"
-                        android:layout_height="40dp"
-                        android:layout_marginTop="10dp"
-                        android:background="@drawable/bg_input_box"
-                        android:hint="Paste dashboard.php?session=... or hex token"
-                        android:inputType="textNoSuggestions"
-                        android:maxLines="1"
-                        android:paddingHorizontal="12dp"
-                        android:textColor="@color/cv_text"
-                        android:textColorHint="@color/cv_text_dim"
-                        android:textSize="13sp" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:orientation="horizontal">
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_srv_open_icc"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="0dp"
-                            android:layout_height="40dp"
-                            android:layout_marginEnd="8dp"
-                            android:layout_weight="1"
-                            android:text="Open ICC Portal"
-                            android:textAllCaps="false"
-                            android:textColor="@color/cv_text"
-                            app:strokeColor="@color/cv_border" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_srv_save_icc"
-                            android:layout_width="0dp"
-                            android:layout_height="40dp"
-                            android:layout_weight="1"
-                            android:text="Save &amp; Sync"
-                            android:textAllCaps="false"
-                            app:backgroundTint="@color/cv_purple" />
-                    </LinearLayout>
-                </LinearLayout>
-
-                <!-- 5. App Updates (Public Release / Version Control) -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:background="@drawable/bg_card_rounded"
-                    android:orientation="vertical"
-                    android:padding="14dp">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
-
-                        <TextView
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="App Updates (Public Release)"
+                            android:text="App Updates"
                             android:textColor="@color/cv_text"
                             android:textSize="14.5sp"
                             android:textStyle="bold" />
@@ -1085,7 +1017,7 @@
                             android:id="@+id/srv_app_version"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="V1.0.1"
+                            android:text="V1.1.2"
                             android:textColor="@color/cv_sky"
                             android:textSize="12sp"
                             android:textStyle="bold" />
@@ -1095,51 +1027,18 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Checks public release/version.json from version control (supports appVersion, appVersionCode, apkPackage &amp; accessControl). Downloads verified HTTPS APK in your system browser."
+                        android:text="CineVault automatically checks for updates in the background every 60 minutes. You can also check manually anytime below."
                         android:textColor="@color/cv_text_muted"
                         android:textSize="12sp" />
 
-                    <EditText
-                        android:id="@+id/input_srv_update_repo"
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_srv_check_updates"
                         android:layout_width="match_parent"
-                        android:layout_height="40dp"
+                        android:layout_height="42dp"
                         android:layout_marginTop="10dp"
-                        android:background="@drawable/bg_input_box"
-                        android:hint="owner/repo or raw public release/version.json URL"
-                        android:inputType="textUri"
-                        android:maxLines="1"
-                        android:paddingHorizontal="12dp"
-                        android:textColor="@color/cv_text"
-                        android:textColorHint="@color/cv_text_dim"
-                        android:textSize="13sp" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:orientation="horizontal">
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_srv_save_repo"
-                            style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="0dp"
-                            android:layout_height="40dp"
-                            android:layout_marginEnd="8dp"
-                            android:layout_weight="1"
-                            android:text="Save Source"
-                            android:textAllCaps="false"
-                            android:textColor="@color/cv_text"
-                            app:strokeColor="@color/cv_border" />
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/btn_srv_check_updates"
-                            android:layout_width="0dp"
-                            android:layout_height="40dp"
-                            android:layout_weight="1"
-                            android:text="Check Updates"
-                            android:textAllCaps="false"
-                            app:backgroundTint="@color/cv_green" />
-                    </LinearLayout>
+                        android:text="Check for Updates"
+                        android:textAllCaps="false"
+                        app:backgroundTint="@color/cv_green" />
 
                     <TextView
                         android:id="@+id/srv_update_status"
@@ -1166,7 +1065,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="42dp"
                         android:layout_marginTop="8dp"
-                        android:text="Download CineVault.apk"
+                        android:text="Download Update"
                         android:textAllCaps="false"
                         android:visibility="gone"
                         app:backgroundTint="@color/cv_accent" />

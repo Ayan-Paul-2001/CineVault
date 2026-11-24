@@ -37,6 +37,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.cinevault.app.CineVaultApp;
 import com.cinevault.app.R;
+import com.cinevault.app.data.MediaDownloadManager;
 import com.cinevault.app.data.MediaRepository;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
@@ -66,6 +67,8 @@ import java.util.Locale;
  * - Dedicated Servers tab (Server Health, Auto-Sync Scheduler, ICC Session, Public Release Version Control Updates)
  */
 public final class MainActivity extends AppCompatActivity {
+    public static final String EXTRA_OPEN_TAB = "open_tab";
+
     private static final int[] AUTO_SYNC_INTERVAL_MINS = {15, 30, 60, 180, 360};
     private static final String[] AUTO_SYNC_INTERVAL_LABELS = {
             "Every 15 min", "Every 30 min", "Every 1 hour", "Every 3 hours", "Every 6 hours"
@@ -134,11 +137,23 @@ public final class MainActivity extends AppCompatActivity {
     private final List<String> langValues = new ArrayList<>();
     private final List<String> sortValues = new ArrayList<>();
 
-    // My List widgets
+    // My List & In-App Downloads widgets
     private View myListHistorySection, myListWlEmpty;
     private TextView myListHistoryTitle, myListWlTitle;
-    private MaterialButton btnClearHistory, btnClearWatchlist;
+    private TextView myListDownloadsTitle, myListDownloadsActiveBadge, myListDownloadsEmpty;
+    private LinearLayout myListDownloadsList;
+    private MaterialButton btnClearHistory, btnClearWatchlist, btnClearCompletedDownloads;
     private MediaCardAdapter myListHistoryAdapter, myListWlAdapter;
+
+    private final Runnable downloadsPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (currentTab == 3 && !isFinishing() && !isDestroyed()) {
+                refreshDownloadsSectionOnly();
+                uiHandler.postDelayed(this, 1000L);
+            }
+        }
+    };
 
     // Dedicated Servers, Health, Auto-Sync & App Updates widgets
     private TextView srvStatsSummary, srvStatsDups, srvStatsSources, srvSyncLabel, srvSyncErrors;
@@ -224,10 +239,27 @@ public final class MainActivity extends AppCompatActivity {
         app.repository.addSyncListener(syncListener);
 
         bootstrapCatalogAndHome();
+        handleOpenTabIntent(getIntent());
         checkForUpdatesBackground(true);
         uiHandler.postDelayed(heroRotateRunnable, 8000);
         uiHandler.postDelayed(autoSyncCheckRunnable, 60000);
         uiHandler.postDelayed(autoUpdateCheckRunnable, UpdateService.AUTO_CHECK_INTERVAL_MS);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleOpenTabIntent(intent);
+    }
+
+    private void handleOpenTabIntent(Intent intent) {
+        if (intent == null) return;
+        int requested = intent.getIntExtra(EXTRA_OPEN_TAB, -1);
+        if (requested >= 0) {
+            intent.removeExtra(EXTRA_OPEN_TAB);
+            switchTab(requested, "", "", "recent");
+        }
     }
 
     private void applyEdgeToEdgeInsets() {
@@ -279,9 +311,18 @@ public final class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         if (currentTab == 0) loadHome(false);
-        else if (currentTab == 3) loadMyList();
+        else if (currentTab == 3) {
+            loadMyList();
+            startDownloadsPolling();
+        }
         else if (currentTab == 5) loadServersTab(false);
         checkForUpdatesBackground(true);
+    }
+
+    @Override
+    protected void onPause() {
+        uiHandler.removeCallbacks(downloadsPollRunnable);
+        super.onPause();
     }
 
     @Override
@@ -375,6 +416,11 @@ public final class MainActivity extends AppCompatActivity {
         myListWlTitle = findViewById(R.id.mylist_wl_title);
         btnClearWatchlist = findViewById(R.id.btn_clear_watchlist);
         myListWlEmpty = findViewById(R.id.mylist_wl_empty);
+        myListDownloadsTitle = findViewById(R.id.mylist_downloads_title);
+        myListDownloadsActiveBadge = findViewById(R.id.mylist_downloads_active_badge);
+        myListDownloadsEmpty = findViewById(R.id.mylist_downloads_empty);
+        myListDownloadsList = findViewById(R.id.mylist_downloads_list);
+        btnClearCompletedDownloads = findViewById(R.id.btn_clear_completed_downloads);
 
         RecyclerView histRv = findViewById(R.id.mylist_history_recycler);
         histRv.setLayoutManager(new LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false));
@@ -419,6 +465,7 @@ public final class MainActivity extends AppCompatActivity {
         UiHelper.applyTvFocusEffect(btnNextPage, 1.05f);
         UiHelper.applyTvFocusEffect(btnClearHistory, 1.05f);
         UiHelper.applyTvFocusEffect(btnClearWatchlist, 1.05f);
+        UiHelper.applyTvFocusEffect(btnClearCompletedDownloads, 1.05f);
         UiHelper.applyTvFocusEffect(btnSrvSyncQuick, 1.04f);
         UiHelper.applyTvFocusEffect(btnSrvSyncFull, 1.04f);
         UiHelper.applyTvFocusEffect(btnSrvPingAll, 1.05f);
@@ -651,6 +698,16 @@ public final class MainActivity extends AppCompatActivity {
                     app.repository.db.clearWatchlist();
                     uiHandler.post(() -> { loadMyList(); loadHome(false); });
                 })));
+
+        btnClearCompletedDownloads.setOnClickListener(v -> app.ioExecutor.execute(() -> {
+            List<Models.DownloadStatusItem> live = MediaDownloadManager.queryLiveDownloads(MainActivity.this, app.repository.db);
+            for (Models.DownloadStatusItem it : live) {
+                if (it.completed || it.failed) {
+                    app.repository.db.deleteDownloadRecord(it.record.downloadId);
+                }
+            }
+            uiHandler.post(this::refreshDownloadsSectionOnly);
+        }));
 
         setupSpinners();
         setupServersTabListeners();
@@ -918,11 +975,21 @@ public final class MainActivity extends AppCompatActivity {
             bottomNav.getMenu().findItem(R.id.nav_mylist).setChecked(true);
             showActiveTabView();
             loadMyList();
+            startDownloadsPolling();
         } else if (tabIndex == 5) {
+            uiHandler.removeCallbacks(downloadsPollRunnable);
             bottomNav.getMenu().findItem(R.id.nav_servers).setChecked(true);
             showActiveTabView();
             loadServersTab(app.repository.getSyncProgress().serverHealth.isEmpty());
         }
+        if (tabIndex != 3) {
+            uiHandler.removeCallbacks(downloadsPollRunnable);
+        }
+    }
+
+    private void startDownloadsPolling() {
+        uiHandler.removeCallbacks(downloadsPollRunnable);
+        uiHandler.postDelayed(downloadsPollRunnable, 1000L);
     }
 
     private void showActiveTabView() {
@@ -1044,9 +1111,11 @@ public final class MainActivity extends AppCompatActivity {
 
     private void loadMyList() {
         app.ioExecutor.execute(() -> {
+            List<Models.DownloadStatusItem> downloads = MediaDownloadManager.queryLiveDownloads(this, app.repository.db);
             List<Models.MediaSummary> hist = app.repository.db.getContinueWatching(40);
             List<Models.MediaSummary> wl = app.repository.db.getWatchlist();
             uiHandler.post(() -> {
+                renderDownloadsList(downloads);
                 myListHistorySection.setVisibility(hist.isEmpty() ? View.GONE : View.VISIBLE);
                 myListHistoryTitle.setText("Recently Watched (" + hist.size() + ")");
                 myListHistoryAdapter.submitList(hist);
@@ -1057,6 +1126,184 @@ public final class MainActivity extends AppCompatActivity {
                 myListWlAdapter.submitList(wl);
             });
         });
+    }
+
+    private void refreshDownloadsSectionOnly() {
+        app.ioExecutor.execute(() -> {
+            List<Models.DownloadStatusItem> downloads = MediaDownloadManager.queryLiveDownloads(this, app.repository.db);
+            uiHandler.post(() -> renderDownloadsList(downloads));
+        });
+    }
+
+    private void renderDownloadsList(List<Models.DownloadStatusItem> items) {
+        if (myListDownloadsList == null) return;
+        int total = items != null ? items.size() : 0;
+        int activeCount = 0;
+        boolean hasClearable = false;
+        if (items != null) {
+            for (Models.DownloadStatusItem it : items) {
+                if (it.active) activeCount++;
+                if (it.completed || it.failed) hasClearable = true;
+            }
+        }
+        myListDownloadsTitle.setText("Current Downloads (" + total + ")");
+        if (activeCount > 0) {
+            myListDownloadsActiveBadge.setVisibility(View.VISIBLE);
+            myListDownloadsActiveBadge.setText(activeCount + " active");
+        } else {
+            myListDownloadsActiveBadge.setVisibility(View.GONE);
+        }
+        btnClearCompletedDownloads.setVisibility(hasClearable ? View.VISIBLE : View.GONE);
+        myListDownloadsEmpty.setVisibility(total == 0 ? View.VISIBLE : View.GONE);
+
+        myListDownloadsList.removeAllViews();
+        if (items == null || items.isEmpty()) return;
+
+        for (Models.DownloadStatusItem item : items) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            int p = UiHelper.dp(this, 12);
+            card.setPadding(p, p, p, p);
+            int stroke = item.active ? 0x6638BDF8 : (item.completed ? 0x5522C55E : 0x44EF4444);
+            card.setBackground(UiHelper.outlineBoxDrawable(stroke, 0xFF0D1220));
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            clp.bottomMargin = UiHelper.dp(this, 10);
+            card.setLayoutParams(clp);
+
+            LinearLayout header = new LinearLayout(this);
+            header.setOrientation(LinearLayout.HORIZONTAL);
+            header.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+            TextView tvTitle = new TextView(this);
+            String titleTxt = item.record.title;
+            if (item.record.episodeLabel != null && !item.record.episodeLabel.isEmpty()) {
+                titleTxt += " · " + item.record.episodeLabel;
+            }
+            tvTitle.setText(titleTxt);
+            tvTitle.setTextColor(0xFFF3F6FC);
+            tvTitle.setTextSize(13.5f);
+            tvTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+            tvTitle.setMaxLines(1);
+            tvTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            tvTitle.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            header.addView(tvTitle);
+
+            TextView tvStatus = new TextView(this);
+            tvStatus.setText(item.statusLabel);
+            tvStatus.setTextSize(11.5f);
+            tvStatus.setTypeface(null, android.graphics.Typeface.BOLD);
+            tvStatus.setPadding(UiHelper.dp(this, 8), 0, 0, 0);
+            tvStatus.setTextColor(item.completed ? 0xFF22C55E : (item.active ? 0xFF38BDF8 : 0xFFEF4444));
+            header.addView(tvStatus);
+            card.addView(header);
+
+            TextView tvSub = new TextView(this);
+            List<String> subParts = new ArrayList<>();
+            if (item.record.quality != null && !item.record.quality.isEmpty()) subParts.add(item.record.quality);
+            if (item.record.serverLabel != null && !item.record.serverLabel.isEmpty()) subParts.add(item.record.serverLabel);
+            if (item.totalBytes > 0) {
+                if (item.completed) subParts.add(Models.formatBytes(item.totalBytes));
+                else subParts.add(Models.formatBytes(item.downloadedBytes) + " / " + Models.formatBytes(item.totalBytes));
+            } else if (item.downloadedBytes > 0) {
+                subParts.add(Models.formatBytes(item.downloadedBytes) + " downloaded");
+            }
+            if (item.record.wifiOnly) subParts.add("Wi-Fi only");
+            subParts.add(MediaDownloadManager.saveLocationHint());
+            tvSub.setText(String.join(" · ", subParts));
+            tvSub.setTextColor(0xFF94A3B8);
+            tvSub.setTextSize(11.5f);
+            tvSub.setPadding(0, UiHelper.dp(this, 3), 0, UiHelper.dp(this, 6));
+            card.addView(tvSub);
+
+            ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            bar.setMax(100);
+            bar.setIndeterminate(item.active && item.totalBytes <= 0 && item.percent == 0);
+            bar.setProgress(item.percent);
+            bar.setProgressTintList(android.content.res.ColorStateList.valueOf(
+                    item.completed ? 0xFF22C55E : (item.active ? 0xFF38BDF8 : 0xFFEF4444)));
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, UiHelper.dp(this, 6));
+            blp.bottomMargin = UiHelper.dp(this, 8);
+            bar.setLayoutParams(blp);
+            card.addView(bar);
+
+            LinearLayout actions = new LinearLayout(this);
+            actions.setOrientation(LinearLayout.HORIZONTAL);
+            actions.setGravity(android.view.Gravity.END);
+
+            if (item.completed && item.localUri != null && !item.localUri.isEmpty()) {
+                MaterialButton playOfflineBtn = new MaterialButton(this);
+                playOfflineBtn.setText("Play Offline");
+                playOfflineBtn.setAllCaps(false);
+                playOfflineBtn.setBackgroundColor(0xFFE50914);
+                playOfflineBtn.setTextColor(0xFFFFFFFF);
+                playOfflineBtn.setTextSize(12f);
+                LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 36));
+                plp.rightMargin = UiHelper.dp(this, 8);
+                playOfflineBtn.setLayoutParams(plp);
+                playOfflineBtn.setOnClickListener(v -> playDownloadedOffline(item));
+                UiHelper.applyTvFocusEffect(playOfflineBtn, 1.05f);
+                actions.addView(playOfflineBtn);
+            } else if (item.failed && ServerConfig.isAllowedUrl(item.record.url)) {
+                MaterialButton retryBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+                retryBtn.setText("Retry");
+                retryBtn.setAllCaps(false);
+                retryBtn.setTextSize(12f);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 36));
+                rlp.rightMargin = UiHelper.dp(this, 8);
+                retryBtn.setLayoutParams(rlp);
+                retryBtn.setOnClickListener(v -> app.ioExecutor.execute(() -> {
+                    MediaDownloadManager.cancelOrRemoveDownload(MainActivity.this, app.repository.db, item.record.downloadId);
+                    Models.MediaFileEntry fe = new Models.MediaFileEntry(
+                            item.record.fileName, item.record.url, "video", "", item.record.totalBytes, 0,
+                            null, 1, item.record.episodeLabel != null ? item.record.episodeLabel : "",
+                            "", item.record.quality, true);
+                    MediaDownloadManager.enqueueMediaDownload(MainActivity.this, app.repository.db,
+                            item.record.mediaId, item.record.title, fe, item.record.quality,
+                            item.record.serverLabel, item.record.seasonName, item.record.wifiOnly,
+                            Collections.emptyList());
+                    uiHandler.post(this::refreshDownloadsSectionOnly);
+                }));
+                UiHelper.applyTvFocusEffect(retryBtn, 1.05f);
+                actions.addView(retryBtn);
+            }
+
+            MaterialButton removeBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            removeBtn.setText(item.active ? "Cancel" : "Remove");
+            removeBtn.setAllCaps(false);
+            removeBtn.setTextColor(0xFFFCA5A5);
+            removeBtn.setTextSize(12f);
+            removeBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 36)));
+            removeBtn.setOnClickListener(v -> app.ioExecutor.execute(() -> {
+                MediaDownloadManager.cancelOrRemoveDownload(MainActivity.this, app.repository.db, item.record.downloadId);
+                uiHandler.post(this::refreshDownloadsSectionOnly);
+            }));
+            UiHelper.applyTvFocusEffect(removeBtn, 1.05f);
+            actions.addView(removeBtn);
+
+            card.addView(actions);
+            myListDownloadsList.addView(card);
+        }
+    }
+
+    private void playDownloadedOffline(Models.DownloadStatusItem item) {
+        if (item == null || item.localUri == null || item.localUri.isEmpty()) return;
+        Models.MediaFileEntry localFile = new Models.MediaFileEntry(
+                item.record.fileName, item.localUri, "video", "", item.totalBytes, 0,
+                null, 1, item.record.episodeLabel != null ? item.record.episodeLabel : "",
+                "", item.record.quality, true);
+        Models.PlaybackSession session = new Models.PlaybackSession(
+                item.record.mediaId, item.record.title, localFile, Collections.emptyList(),
+                item.record.seasonName, Collections.emptyList(), 0,
+                item.record.quality != null ? item.record.quality : "Offline",
+                "Downloaded Offline", Collections.emptyList(), 0);
+        Intent i = new Intent(this, PlayerActivity.class);
+        i.putExtra(PlayerActivity.EXTRA_SESSION, session);
+        startActivity(i);
     }
 
     private void loadServersTab(boolean triggerPing) {

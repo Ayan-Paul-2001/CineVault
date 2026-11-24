@@ -19,6 +19,7 @@ import {
   Check,
   AlertTriangle,
   Upload,
+  Gauge,
 } from "lucide-react";
 import {
   apiGet,
@@ -88,12 +89,15 @@ const SUB_SIZES = [
   { id: "xl", label: "XL" },
 ];
 
+const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
 export default function VideoPlayer({
   session,
   onClose,
   onSwitchEpisode,
   onSwitchQualityOption,
   onProgressSaved,
+  onRequestDownload,
 }) {
   const {
     item,
@@ -146,10 +150,26 @@ export default function VideoPlayer({
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [speedHud, setSpeedHud] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [idle, setIdle] = useState(false);
-  const [activeMenu, setActiveMenu] = useState(null); // "settings" | "audio" | "subs" | null
+  const [activeMenu, setActiveMenu] = useState(null); // "settings" | "audio" | "subs" | "speed" | null
   const [streamError, setStreamError] = useState(null);
+  const speedHudTimerRef = useRef(null);
+
+  const applySpeed = useCallback((nextRate, flashHud = true) => {
+    const clamped = PLAYBACK_SPEEDS.includes(nextRate) ? nextRate : 1;
+    setPlaybackRate(clamped);
+    if (videoRef.current) videoRef.current.playbackRate = clamped;
+    if (flashHud) {
+      setSpeedHud(`${clamped}x`);
+      if (speedHudTimerRef.current) clearTimeout(speedHudTimerRef.current);
+      speedHudTimerRef.current = setTimeout(() => setSpeedHud(null), 950);
+    }
+  }, []);
+
+  useEffect(() => () => clearTimeout(speedHudTimerRef.current), []);
 
   const hasNext = Array.isArray(playlist) && playlistIndex < playlist.length - 1;
   const isFfmpegMode = mode !== "direct";
@@ -398,6 +418,7 @@ export default function VideoPlayer({
     setStreamError(null);
     v.load();
     const onCanPlay = () => {
+      v.playbackRate = playbackRate;
       if (!isFfmpegMode && startTime > 3 && v.currentTime < 2 && lastSavedRef.current === 0) {
         v.currentTime = startTime;
       }
@@ -547,6 +568,14 @@ export default function VideoPlayer({
           if (videoRef.current) videoRef.current.volume = next;
           return next;
         });
+      } else if (e.key === ">" || (e.shiftKey && e.key === ".")) {
+        e.preventDefault();
+        const idx = PLAYBACK_SPEEDS.indexOf(playbackRate);
+        if (idx >= 0 && idx < PLAYBACK_SPEEDS.length - 1) applySpeed(PLAYBACK_SPEEDS[idx + 1], true);
+      } else if (e.key === "<" || (e.shiftKey && e.key === ",")) {
+        e.preventDefault();
+        const idx = PLAYBACK_SPEEDS.indexOf(playbackRate);
+        if (idx > 0) applySpeed(PLAYBACK_SPEEDS[idx - 1], true);
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         setVolume((vol) => {
@@ -561,9 +590,11 @@ export default function VideoPlayer({
   }, [
     activeMenu,
     allSubs,
+    applySpeed,
     currentTime,
     duration,
     onClose,
+    playbackRate,
     pokeActivity,
     saveProgress,
     seekTo,
@@ -648,9 +679,30 @@ export default function VideoPlayer({
             >
               <ListVideo size={17} /> VLC
             </a>
-            <a className="p-btn" href={buildDownloadUrl(file.url)} title="Download File">
-              <Download size={17} />
-            </a>
+            {onRequestDownload ? (
+              <button
+                className="p-btn"
+                onClick={() =>
+                  onRequestDownload({
+                    title: item?.title || file.name,
+                    fileName: file.name,
+                    url: file.url,
+                    size: file.size || 0,
+                    quality: qualityLabel || item?.quality || "HD",
+                    serverLabel: serverLabel || "CineVault",
+                    seasonName: seasonName || null,
+                    episodeLabel: file.label || null,
+                  })
+                }
+                title="In-App Download Options"
+              >
+                <Download size={17} />
+              </button>
+            ) : (
+              <a className="p-btn" href={buildDownloadUrl(file.url)} title="Download File">
+                <Download size={17} />
+              </a>
+            )}
             <button className="p-btn" onClick={handleClose} aria-label="Close player">
               <X size={22} />
             </button>
@@ -672,10 +724,12 @@ export default function VideoPlayer({
           }}
           onWaiting={() => setBuffering(true)}
           onPlaying={() => {
+            if (videoRef.current) videoRef.current.playbackRate = playbackRate;
             setBuffering(false);
             setStreamError(null);
           }}
           onLoadedMetadata={(e) => {
+            e.currentTarget.playbackRate = playbackRate;
             const vd = e.currentTarget.duration;
             if (Number.isFinite(vd) && vd > 0 && !isFfmpegMode) {
               setDuration(vd);
@@ -722,6 +776,14 @@ export default function VideoPlayer({
                 ))}
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Speed HUD Flash */}
+        {speedHud && (
+          <div className="player-speed-hud">
+            <Gauge size={18} />
+            <span>Speed · {speedHud}</span>
           </div>
         )}
 
@@ -894,6 +956,25 @@ export default function VideoPlayer({
               </>
             )}
 
+            {activeMenu === "speed" && (
+              <>
+                <div className="pop-section-title">Playback Speed (Shift+&lt; / Shift+&gt;)</div>
+                {PLAYBACK_SPEEDS.map((spd) => (
+                  <button
+                    key={spd}
+                    className={`pop-option ${playbackRate === spd ? "selected" : ""}`}
+                    onClick={() => {
+                      applySpeed(spd, true);
+                      setActiveMenu(null);
+                    }}
+                  >
+                    <span>{spd === 1 ? "1x (Normal)" : `${spd}x`}</span>
+                    {playbackRate === spd && <Check size={15} />}
+                  </button>
+                ))}
+              </>
+            )}
+
             {activeMenu === "settings" && (
               <>
                 {qualityOptions.length > 1 && onSwitchQualityOption && (
@@ -1036,6 +1117,15 @@ export default function VideoPlayer({
                   Next Ep <ChevronRight size={16} />
                 </button>
               )}
+
+              <button
+                className={`p-btn ${activeMenu === "speed" || playbackRate !== 1 ? "active" : ""}`}
+                onClick={() => setActiveMenu((m) => (m === "speed" ? null : "speed"))}
+                title="Playback Speed (Shift+< / Shift+>)"
+              >
+                <Gauge size={17} />
+                <span>{playbackRate}x</span>
+              </button>
 
               <button
                 className={`p-btn ${activeMenu === "audio" ? "active" : ""}`}

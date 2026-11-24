@@ -7,7 +7,6 @@ import {
   Plus,
   Check,
   RefreshCw,
-  Copy,
   Film,
   Tv,
   Star,
@@ -133,6 +132,7 @@ export default function DetailModal({
   initialPlay = false,
   onClose,
   onPlayFile,
+  onRequestDownload,
   onToggleWatchlist,
   onNotify,
 }) {
@@ -227,15 +227,6 @@ export default function DetailModal({
   }, [selectedSeriesEdition, seriesEditions, unifiedSeasons]);
 
   const activeSeason = displayedSeasons[selectedSeason] || displayedSeasons[0] || null;
-
-  const copyLink = async (url) => {
-    try {
-      await navigator.clipboard.writeText(url);
-      onNotify("Direct server link copied!");
-    } catch {
-      onNotify("Could not access clipboard");
-    }
-  };
 
   const handleToggleWl = async () => {
     if (!item) return;
@@ -501,15 +492,14 @@ export default function DetailModal({
                                   }}
                                 >
                                   <span
-                                    className={`server-chip ${
-                                      ed.source === "icc"
-                                        ? "chip-icc"
-                                        : ed.source === "circleftp"
-                                          ? "chip-circle"
-                                          : ed.source === "discoveryftp"
-                                            ? "chip-discovery"
-                                            : "chip-df"
-                                    }`}
+                                    className={`server-chip ${ed.source === "icc"
+                                      ? "chip-icc"
+                                      : ed.source === "circleftp"
+                                        ? "chip-circle"
+                                        : ed.source === "discoveryftp"
+                                          ? "chip-discovery"
+                                          : "chip-df"
+                                      }`}
                                   >
                                     {ed.serverLabel}
                                   </span>
@@ -554,44 +544,48 @@ export default function DetailModal({
                               <button
                                 className="btn btn-primary btn-sm"
                                 style={{ height: 34, padding: "0 12px" }}
-                                  onClick={() =>
-                                    onPlayFile({
-                                      item,
-                                      file: f,
-                                      externalSubtitles: ed.subtitles || [],
-                                      qualityLabel: fq,
-                                      serverLabel: ed.serverLabel,
-                                      qualityOptions,
-                                      startTime: hist && !hist.completed ? hist.position : 0,
-                                    })
-                                  }
-                                >
-                                  <Play size={14} fill="currentColor" /> Play
-                                </button>
-                                <a
-                                  className="icon-btn"
-                                  href={buildDownloadUrl(f.url)}
-                                  title={`Download ${fq} from ${ed.serverLabel}`}
-                                >
-                                  <Download size={16} />
-                                </a>
-                                <a
-                                  className="icon-btn"
-                                  href={buildM3uUrl({
-                                    url: f.url,
-                                    title: `${item.title} [${fq} - ${ed.serverLabel}]`,
-                                  })}
-                                  title={`Open ${fq} in VLC / PotPlayer`}
-                                >
-                                <ListVideo size={16} />
-                              </a>
+                                onClick={() =>
+                                  onPlayFile({
+                                    item,
+                                    file: f,
+                                    externalSubtitles: ed.subtitles || [],
+                                    qualityLabel: fq,
+                                    serverLabel: ed.serverLabel,
+                                    qualityOptions,
+                                    startTime: hist && !hist.completed ? hist.position : 0,
+                                  })
+                                }
+                              >
+                                <Play size={14} fill="currentColor" /> Play
+                              </button>
                               <button
                                 className="icon-btn"
-                                onClick={() => copyLink(f.url)}
-                                title="Copy Direct Server URL"
+                                onClick={() =>
+                                  onRequestDownload
+                                    ? onRequestDownload({
+                                      title: item.title,
+                                      fileName: f.name,
+                                      url: f.url,
+                                      size: f.size || 0,
+                                      quality: fq,
+                                      serverLabel: ed.serverLabel,
+                                    })
+                                    : (window.location.href = buildDownloadUrl(f.url))
+                                }
+                                title={`Download ${fq} from ${ed.serverLabel} inside CineVault`}
                               >
-                                <Copy size={15} />
+                                <Download size={16} />
                               </button>
+                              <a
+                                className="icon-btn"
+                                href={buildM3uUrl({
+                                  url: f.url,
+                                  title: `${item.title} [${fq} - ${ed.serverLabel}]`,
+                                })}
+                                title={`Open ${fq} in VLC / PotPlayer`}
+                              >
+                                <ListVideo size={16} />
+                              </a>
                             </div>
                           </div>
                         );
@@ -729,19 +723,25 @@ export default function DetailModal({
                                 >
                                   <ListVideo size={16} />
                                 </a>
-                                <a
-                                  className="icon-btn"
-                                  href={buildDownloadUrl(ep.url)}
-                                  title={`Download from ${epServer}`}
-                                >
-                                  <Download size={16} />
-                                </a>
                                 <button
                                   className="icon-btn"
-                                  onClick={() => copyLink(ep.url)}
-                                  title="Copy URL"
+                                  onClick={() =>
+                                    onRequestDownload
+                                      ? onRequestDownload({
+                                        title: item.title,
+                                        fileName: ep.name,
+                                        url: ep.url,
+                                        size: ep.size || 0,
+                                        quality: item.quality || "HD",
+                                        serverLabel: epServer,
+                                        seasonName: activeSeason.name,
+                                        episodeLabel: ep.label,
+                                      })
+                                      : (window.location.href = buildDownloadUrl(ep.url))
+                                  }
+                                  title={`Download from ${epServer} inside CineVault`}
                                 >
-                                  <Copy size={15} />
+                                  <Download size={16} />
                                 </button>
                               </div>
                             </div>

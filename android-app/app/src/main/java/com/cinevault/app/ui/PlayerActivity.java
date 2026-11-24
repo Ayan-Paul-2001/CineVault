@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -41,6 +42,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
@@ -49,6 +51,8 @@ import androidx.media3.common.VideoSize;
 import androidx.media3.common.text.Cue;
 import androidx.media3.common.text.CueGroup;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
@@ -64,6 +68,7 @@ import androidx.media3.ui.PlayerView;
 
 import com.cinevault.app.CineVaultApp;
 import com.cinevault.app.R;
+import com.cinevault.app.data.MediaDownloadManager;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 
@@ -117,6 +122,11 @@ public final class PlayerActivity extends AppCompatActivity {
             new VideoScaleMode("height", "Fit Vertical", "Height", AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT, 0f)
     };
 
+    private static final float[] PLAYBACK_SPEEDS = {0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f};
+    private static final String[] PLAYBACK_SPEED_LABELS = {
+            "0.25x", "0.5x", "0.75x", "1x (Normal)", "1.25x", "1.5x", "1.75x", "2x"
+    };
+
     private CineVaultApp app;
     private Models.PlaybackSession session;
     private ExoPlayer player;
@@ -124,14 +134,16 @@ public final class PlayerActivity extends AppCompatActivity {
     private AudioManager audioManager;
     private LoudnessEnhancer loudnessEnhancer;
     private ScaleGestureDetector scaleGestureDetector;
+    private GestureDetector tapGestureDetector;
 
     private View gestureLayer, gestureHud, gestureBarTrack, gestureBarFill;
-    private View scaleHud;
+    private View scaleHud, doubleTapLeftHud, doubleTapRightHud;
     private ImageView gestureHudIcon;
     private TextView gestureHudPercent, gestureHudLabel, scaleHudTitle, scaleHudHint;
+    private TextView doubleTapLeftText, doubleTapRightText;
 
     private TextView cinemaSubText, titleView, subtitleView, posTimeView, durTimeView;
-    private TextView btnNextEp, btnScale, btnAudio, btnCc, btnQuality, btnExternal;
+    private TextView btnNextEp, btnSpeed, btnScale, btnAudio, btnCc, btnQuality, btnExternal;
     private ImageButton btnPlayPause;
     private View btnRotate, btnRew, btnFwd;
     private SeekBar seekBar;
@@ -158,9 +170,13 @@ public final class PlayerActivity extends AppCompatActivity {
     private int ioRetryCount = 0;
     private final Set<String> failedStreamUrls = new HashSet<>();
 
-    // VLC-style Video Size / Aspect Ratio state
+    // VLC-style Video Size / Aspect Ratio & YouTube-style Speed / Double-Tap state
     private int scaleModeIndex = 0;
     private float naturalVideoAspectRatio = 16f / 9f;
+    private float playbackSpeed = 1.0f;
+    private int doubleTapSide = 0; // -1 = left, 1 = right
+    private int doubleTapAccumSec = 0;
+    private long lastDoubleTapElapsedMs = 0L;
     private boolean pinchActive = false;
     private boolean pinchTriggered = false;
     private float pinchSpanFactor = 1.0f;
@@ -196,6 +212,23 @@ public final class PlayerActivity extends AppCompatActivity {
             scaleHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
                 scaleHud.setVisibility(View.GONE);
                 scaleHud.setAlpha(1f);
+            }).start();
+        }
+    };
+
+    private final Runnable hideDoubleTapHudTask = () -> {
+        doubleTapSide = 0;
+        doubleTapAccumSec = 0;
+        if (doubleTapLeftHud != null && doubleTapLeftHud.getVisibility() == View.VISIBLE) {
+            doubleTapLeftHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
+                doubleTapLeftHud.setVisibility(View.GONE);
+                doubleTapLeftHud.setAlpha(1f);
+            }).start();
+        }
+        if (doubleTapRightHud != null && doubleTapRightHud.getVisibility() == View.VISIBLE) {
+            doubleTapRightHud.animate().alpha(0f).setDuration(180).withEndAction(() -> {
+                doubleTapRightHud.setVisibility(View.GONE);
+                doubleTapRightHud.setAlpha(1f);
             }).start();
         }
     };
@@ -267,7 +300,10 @@ public final class PlayerActivity extends AppCompatActivity {
         Object extra = getIntent().getSerializableExtra(EXTRA_SESSION);
         if (!(extra instanceof Models.PlaybackSession)) { finish(); return; }
         session = (Models.PlaybackSession) extra;
-        if (!ServerConfig.isAllowedUrl(session.file.url)) {
+        boolean allowedRemote = ServerConfig.isAllowedUrl(session.file.url);
+        boolean verifiedLocal = !allowedRemote
+                && MediaDownloadManager.isVerifiedLocalDownloadUri(this, app.repository.db, session.file.url);
+        if (!allowedRemote && !verifiedLocal) {
             Toast.makeText(this, "Blocked untrusted stream URL.", Toast.LENGTH_SHORT).show();
             finish();
             return;
@@ -441,6 +477,10 @@ public final class PlayerActivity extends AppCompatActivity {
         scaleHud = findViewById(R.id.player_scale_hud);
         scaleHudTitle = findViewById(R.id.scale_hud_title);
         scaleHudHint = findViewById(R.id.scale_hud_hint);
+        doubleTapLeftHud = findViewById(R.id.player_double_tap_left);
+        doubleTapRightHud = findViewById(R.id.player_double_tap_right);
+        doubleTapLeftText = findViewById(R.id.double_tap_left_text);
+        doubleTapRightText = findViewById(R.id.double_tap_right_text);
 
         cinemaSubText = findViewById(R.id.cinema_subtitle_text);
         bufferingView = findViewById(R.id.player_buffering);
@@ -455,6 +495,7 @@ public final class PlayerActivity extends AppCompatActivity {
         btnRew = findViewById(R.id.btn_player_rew);
         btnFwd = findViewById(R.id.btn_player_fwd);
         btnNextEp = findViewById(R.id.btn_player_next_ep);
+        btnSpeed = findViewById(R.id.btn_player_speed);
         btnScale = findViewById(R.id.btn_player_scale);
         btnAudio = findViewById(R.id.btn_player_audio);
         btnCc = findViewById(R.id.btn_player_cc);
@@ -466,6 +507,7 @@ public final class PlayerActivity extends AppCompatActivity {
         UiHelper.applyTvFocusEffect(btnPlayPause, 1.12f);
         UiHelper.applyTvFocusEffect(btnFwd, 1.12f);
         UiHelper.applyTvFocusEffect(btnNextEp, 1.06f);
+        UiHelper.applyTvFocusEffect(btnSpeed, 1.06f);
         UiHelper.applyTvFocusEffect(btnScale, 1.06f);
         UiHelper.applyTvFocusEffect(btnAudio, 1.06f);
         UiHelper.applyTvFocusEffect(btnCc, 1.06f);
@@ -479,6 +521,7 @@ public final class PlayerActivity extends AppCompatActivity {
             posTimeView.setTextSize(14f);
             durTimeView.setTextSize(14f);
             btnNextEp.setTextSize(14.5f);
+            btnSpeed.setTextSize(14.5f);
             btnScale.setTextSize(14.5f);
             btnAudio.setTextSize(14.5f);
             btnCc.setTextSize(14.5f);
@@ -492,6 +535,41 @@ public final class PlayerActivity extends AppCompatActivity {
         if (playerView.getSubtitleView() != null) {
             playerView.getSubtitleView().setVisibility(View.GONE);
         }
+
+        tapGestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDown(@NonNull MotionEvent e) {
+                return true;
+            }
+
+            @Override
+            public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
+                if (gestureMode == GESTURE_NONE && !pinchActive) {
+                    toggleControls();
+                    return true;
+                }
+                return false;
+            }
+
+            @Override
+            public boolean onDoubleTap(@NonNull MotionEvent e) {
+                if (gestureMode != GESTURE_NONE || pinchActive) return false;
+                int width = Math.max(1, gestureLayer.getWidth());
+                float x = e.getX();
+                if (x < width * 0.42f) {
+                    performDoubleTapSeek(-10);
+                } else if (x > width * 0.58f) {
+                    performDoubleTapSeek(10);
+                } else {
+                    togglePlayPause();
+                    showCenterToastHud(
+                            player != null && player.isPlaying() ? "Playing" : "Paused",
+                            "Double-tap left/right to seek ±10s"
+                    );
+                }
+                return true;
+            }
+        });
 
         scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
@@ -541,6 +619,12 @@ public final class PlayerActivity extends AppCompatActivity {
         });
 
         btnNextEp.setOnClickListener(v -> switchEpisode(session.playlistIndex + 1));
+        btnSpeed.setOnClickListener(v -> showSpeedDialog());
+        btnSpeed.setOnLongClickListener(v -> {
+            applyPlaybackSpeed(1.0f, true);
+            scheduleHideControls();
+            return true;
+        });
         btnScale.setOnClickListener(v -> {
             setVideoScaleMode((scaleModeIndex + 1) % SCALE_MODES.length, true);
             scheduleHideControls();
@@ -589,6 +673,9 @@ public final class PlayerActivity extends AppCompatActivity {
     private boolean handleGestureTouch(View v, MotionEvent event) {
         if (scaleGestureDetector != null) {
             scaleGestureDetector.onTouchEvent(event);
+        }
+        if (tapGestureDetector != null && !pinchActive) {
+            tapGestureDetector.onTouchEvent(event);
         }
         int action = event.getActionMasked();
         int width = Math.max(1, v.getWidth());
@@ -651,9 +738,7 @@ public final class PlayerActivity extends AppCompatActivity {
         }
 
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            if (gestureMode == GESTURE_NONE && action == MotionEvent.ACTION_UP) {
-                toggleControls();
-            } else if (gestureMode != GESTURE_NONE) {
+            if (gestureMode != GESTURE_NONE) {
                 handler.removeCallbacks(hideGestureHudTask);
                 handler.postDelayed(hideGestureHudTask, 800);
             }
@@ -661,6 +746,95 @@ public final class PlayerActivity extends AppCompatActivity {
             return true;
         }
         return false;
+    }
+
+    private void performDoubleTapSeek(int deltaSec) {
+        if (player == null) return;
+        int side = deltaSec < 0 ? -1 : 1;
+        long now = SystemClock.elapsedRealtime();
+        if (doubleTapSide == side && (now - lastDoubleTapElapsedMs) <= 1150L) {
+            doubleTapAccumSec += Math.abs(deltaSec);
+        } else {
+            doubleTapSide = side;
+            doubleTapAccumSec = Math.abs(deltaSec);
+        }
+        lastDoubleTapElapsedMs = now;
+
+        long target = Math.max(0L, player.getCurrentPosition() + deltaSec * 1000L);
+        long dur = player.getDuration();
+        if (dur > 0 && dur != C.TIME_UNSET) target = Math.min(dur, target);
+        markUserSeek();
+        lastStablePosMs = target;
+        player.seekTo(target);
+
+        handler.removeCallbacks(hideDoubleTapHudTask);
+        if (side < 0 && doubleTapLeftHud != null) {
+            if (doubleTapRightHud != null) doubleTapRightHud.setVisibility(View.GONE);
+            doubleTapLeftHud.animate().cancel();
+            doubleTapLeftHud.setAlpha(1f);
+            doubleTapLeftText.setText("-" + doubleTapAccumSec + "s");
+            doubleTapLeftHud.setVisibility(View.VISIBLE);
+        } else if (side > 0 && doubleTapRightHud != null) {
+            if (doubleTapLeftHud != null) doubleTapLeftHud.setVisibility(View.GONE);
+            doubleTapRightHud.animate().cancel();
+            doubleTapRightHud.setAlpha(1f);
+            doubleTapRightText.setText("+" + doubleTapAccumSec + "s");
+            doubleTapRightHud.setVisibility(View.VISIBLE);
+        }
+        handler.postDelayed(hideDoubleTapHudTask, 850L);
+    }
+
+    private void showCenterToastHud(String title, String hint) {
+        if (scaleHud == null) return;
+        handler.removeCallbacks(hideScaleHudTask);
+        scaleHud.animate().cancel();
+        scaleHud.setAlpha(1f);
+        scaleHudTitle.setText(title);
+        scaleHudHint.setText(hint);
+        scaleHud.setVisibility(View.VISIBLE);
+        handler.postDelayed(hideScaleHudTask, 1000L);
+    }
+
+    private void showSpeedDialog() {
+        int checked = 3; // 1.0x
+        for (int i = 0; i < PLAYBACK_SPEEDS.length; i++) {
+            if (Math.abs(PLAYBACK_SPEEDS[i] - playbackSpeed) < 0.01f) {
+                checked = i;
+                break;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Playback Speed")
+                .setSingleChoiceItems(PLAYBACK_SPEED_LABELS, checked, (d, which) -> {
+                    d.dismiss();
+                    applyPlaybackSpeed(PLAYBACK_SPEEDS[which], true);
+                    scheduleHideControls();
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void applyPlaybackSpeed(float speed, boolean showHud) {
+        playbackSpeed = Math.max(0.25f, Math.min(2.0f, speed));
+        if (player != null) {
+            player.setPlaybackParameters(new PlaybackParameters(playbackSpeed));
+        }
+        String badge = formatSpeedBadge(playbackSpeed);
+        if (btnSpeed != null) {
+            btnSpeed.setText(badge);
+            btnSpeed.setTextColor(Math.abs(playbackSpeed - 1.0f) < 0.01f ? 0xFFFFFFFF : 0xFFFCA5A5);
+        }
+        if (showHud) {
+            showCenterToastHud("Speed · " + badge, "Long-press speed button to reset to 1x");
+        }
+    }
+
+    public static String formatSpeedBadge(float speed) {
+        if (Math.abs(speed - Math.round(speed)) < 0.01f) {
+            return Math.round(speed) + "x";
+        }
+        String s = String.format(Locale.US, "%.2f", speed).replaceAll("0+$", "");
+        return s + "x";
     }
 
     private float readCurrentBrightness() {
@@ -928,6 +1102,7 @@ public final class PlayerActivity extends AppCompatActivity {
                 .setHandleAudioBecomingNoisy(true)
                 .build();
         playerView.setPlayer(player);
+        player.setPlaybackParameters(new PlaybackParameters(playbackSpeed));
         applyVideoScaleMode(false, false);
 
         player.addListener(new Player.Listener() {
@@ -1119,11 +1294,14 @@ public final class PlayerActivity extends AppCompatActivity {
         btnNextEp.setVisibility(hasNextEpisode() ? View.VISIBLE : View.GONE);
         btnQuality.setVisibility(session.qualityOptions.size() > 1 ? View.VISIBLE : View.GONE);
 
-        String safeStreamUrl = ServerConfig.sanitizeMediaUrl(session.file.url);
-        OkHttpDataSource.Factory dsFactory = new OkHttpDataSource.Factory(app.streamingClient)
-                .setDefaultRequestProperties(ServerConfig.mediaHeadersFor(safeStreamUrl));
+        boolean isLocalFile = session.file.url.startsWith("content://") || session.file.url.startsWith("file://");
+        String playUrl = isLocalFile ? session.file.url : ServerConfig.sanitizeMediaUrl(session.file.url);
+        DataSource.Factory dsFactory = isLocalFile
+                ? new DefaultDataSource.Factory(this)
+                : new OkHttpDataSource.Factory(app.streamingClient)
+                        .setDefaultRequestProperties(ServerConfig.mediaHeadersFor(playUrl));
 
-        MediaItem.Builder mb = new MediaItem.Builder().setUri(Uri.parse(safeStreamUrl));
+        MediaItem.Builder mb = new MediaItem.Builder().setUri(Uri.parse(playUrl));
         if (includeExternalSubtitles && !session.externalSubtitles.isEmpty()) {
             List<MediaItem.SubtitleConfiguration> subConfigs = new ArrayList<>();
             for (int i = 0; i < session.externalSubtitles.size(); i++) {
@@ -1149,6 +1327,7 @@ public final class PlayerActivity extends AppCompatActivity {
         DefaultMediaSourceFactory msFactory = new DefaultMediaSourceFactory(dsFactory, extractorsFactory)
                 .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy(6));
         player.setMediaSource(msFactory.createMediaSource(mb.build()), safeStartMs);
+        player.setPlaybackParameters(new PlaybackParameters(playbackSpeed));
         player.prepare();
         player.play();
     }

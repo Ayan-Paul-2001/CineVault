@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.cinevault.app.data.IccService;
+import com.cinevault.app.data.MediaDownloadManager;
 import com.cinevault.app.data.MediaParser;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
@@ -148,5 +149,14 @@ public class CineVaultUnitTest {
         assertEquals("998877", cards.get(0).playId);
         assertEquals("http://10.16.100.244/player.php?play=998877", cards.get(0).url);
         assertEquals("http://10.16.100.244/files/Poster%20%5B4K%5D%202026.jpg", cards.get(0).posterUrl);
+    }
+
+    @Test
+    public void downloadManagerSanitizesFileNamesAndInfersMime() {
+        assertEquals("Dune Part Two (2024) 4K.mkv",
+                MediaDownloadManager.sanitizeDownloadFileName("/Movies/Dune: Part Two? (2024) 4K.mkv", "fallback.mkv"));
+        assertEquals("video/x-matroska", MediaDownloadManager.inferMimeType("Movie.MKV"));
+        assertEquals("video/mp4", MediaDownloadManager.inferMimeType("Episode.mp4"));
+        assertEquals("application/x-subrip", MediaDownloadManager.inferMimeType("English.srt"));
     }
 }

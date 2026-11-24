@@ -54,10 +54,13 @@ export default function App() {
   const [upstreamResults, setUpstreamResults] = useState([]);
   const [upstreamLoading, setUpstreamLoading] = useState(false);
 
-  // My List state
+  // My List & In-App Downloads state
   const [watchlist, setWatchlist] = useState([]);
   const [historyList, setHistoryList] = useState([]);
   const [confirmClear, setConfirmClear] = useState(null); // "history" | "watchlist" | null
+  const [downloads, setDownloads] = useState([]); // { id, title, fileName, url, quality, serverLabel, status, downloaded, total, percent, speedBps, error }
+  const [pendingDownload, setPendingDownload] = useState(null);
+  const downloadAbortMapRef = useRef(new Map());
 
   // Overlays
   const [activeDetail, setActiveDetail] = useState(null); // { id, initialPlay }
@@ -314,6 +317,192 @@ export default function App() {
     }
   };
 
+  // --- IN-APP DOWNLOAD MANAGER (Live Progress, Speed, Cancel, Retry — stays inside CineVault) ---
+  const updateDownloadItem = useCallback((id, patch) => {
+    setDownloads((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+  }, []);
+
+  const cancelInAppDownload = useCallback((id) => {
+    const ctrl = downloadAbortMapRef.current.get(id);
+    if (ctrl) {
+      ctrl.abort();
+      downloadAbortMapRef.current.delete(id);
+    }
+    setDownloads((prev) =>
+      prev.map((d) =>
+        d.id === id && d.status === "downloading" ? { ...d, status: "canceled", speedBps: 0 } : d
+      )
+    );
+  }, []);
+
+  const removeDownloadItem = useCallback(
+    (id) => {
+      cancelInAppDownload(id);
+      setDownloads((prev) => prev.filter((d) => d.id !== id));
+    },
+    [cancelInAppDownload]
+  );
+
+  const startInAppDownload = useCallback(
+    async (req, mode = "stream") => {
+      const id = `dl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const cleanName = (req.fileName || `${req.title || "CineVault"}.mkv`)
+        .replace(/[\\/:*?"<>|]+/g, " ")
+        .trim();
+      const dlUrl = buildDownloadUrl(req.url);
+
+      setPendingDownload(null);
+
+      // Optional native browser background transfer (same page, never opens new tab)
+      if (mode === "direct") {
+        setDownloads((prev) => [
+          {
+            id,
+            title: req.title || cleanName,
+            fileName: cleanName,
+            url: req.url,
+            quality: req.quality || "HD",
+            serverLabel: req.serverLabel || "CineVault",
+            seasonName: req.seasonName || null,
+            episodeLabel: req.episodeLabel || null,
+            status: "completed",
+            downloaded: req.size || 0,
+            total: req.size || 0,
+            percent: 100,
+            speedBps: 0,
+            note: "Started via browser save",
+          },
+          ...prev,
+        ]);
+        const a = document.createElement("a");
+        a.href = dlUrl;
+        a.download = cleanName;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        notify(`Saving "${cleanName}" directly...`);
+        return;
+      }
+
+      // Check File System Access API (zero-RAM streaming disk writes on Chrome/Edge for huge 4K MKVs)
+      let fileWritable = null;
+      if (typeof window.showSaveFilePicker === "function") {
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: cleanName });
+          fileWritable = await handle.createWritable();
+        } catch (err) {
+          if (err?.name === "AbortError") return; // User canceled file picker
+        }
+      }
+
+      const abortController = new AbortController();
+      downloadAbortMapRef.current.set(id, abortController);
+      setDownloads((prev) => [
+        {
+          id,
+          title: req.title || cleanName,
+          fileName: cleanName,
+          url: req.url,
+          quality: req.quality || "HD",
+          serverLabel: req.serverLabel || "CineVault",
+          seasonName: req.seasonName || null,
+          episodeLabel: req.episodeLabel || null,
+          status: "downloading",
+          downloaded: 0,
+          total: req.size || 0,
+          percent: 0,
+          speedBps: 0,
+          error: null,
+        },
+        ...prev,
+      ]);
+      notify(`Downloading "${req.title || cleanName}" inside CineVault`);
+
+      try {
+        const res = await fetch(dlUrl, { signal: abortController.signal });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const headerTotal = parseInt(res.headers.get("content-length") || "0", 10) || req.size || 0;
+        const reader = res.body.getReader();
+        const chunks = fileWritable ? null : [];
+        let downloaded = 0;
+        let lastTick = performance.now();
+        let lastBytes = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (fileWritable) {
+            await fileWritable.write(value);
+          } else {
+            chunks.push(value);
+          }
+          downloaded += value.byteLength;
+          const now = performance.now();
+          if (now - lastTick >= 350) {
+            const dt = Math.max(0.1, (now - lastTick) / 1000);
+            const speedBps = (downloaded - lastBytes) / dt;
+            const total = headerTotal || downloaded;
+            const percent = headerTotal > 0 ? Math.min(99, Math.round((downloaded / headerTotal) * 100)) : 0;
+            updateDownloadItem(id, { downloaded, total, percent, speedBps });
+            lastTick = now;
+            lastBytes = downloaded;
+          }
+        }
+
+        if (fileWritable) {
+          await fileWritable.close();
+        } else {
+          const blob = new Blob(chunks);
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = blobUrl;
+          a.download = cleanName;
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        }
+
+        downloadAbortMapRef.current.delete(id);
+        updateDownloadItem(id, {
+          status: "completed",
+          downloaded,
+          total: headerTotal || downloaded,
+          percent: 100,
+          speedBps: 0,
+        });
+        notify(`Download complete: ${cleanName}`);
+      } catch (err) {
+        downloadAbortMapRef.current.delete(id);
+        if (fileWritable) {
+          try { await fileWritable.abort(); } catch {}
+        }
+        if (err?.name === "AbortError") {
+          updateDownloadItem(id, { status: "canceled", speedBps: 0 });
+        } else {
+          updateDownloadItem(id, {
+            status: "failed",
+            speedBps: 0,
+            error: err?.message || "Download interrupted",
+          });
+        }
+      }
+    },
+    [notify, updateDownloadItem]
+  );
+
+  const activeDownloadCount = downloads.filter((d) => d.status === "downloading").length;
+  const activeDownloadAvgPct =
+    activeDownloadCount > 0
+      ? Math.round(
+          downloads
+            .filter((d) => d.status === "downloading")
+            .reduce((acc, d) => acc + (d.percent || 0), 0) / activeDownloadCount
+        )
+      : 0;
+
   const handleTriggerSync = async (mode) => {
     try {
       const res = await apiPost("/api/sync", { mode });
@@ -417,6 +606,20 @@ export default function App() {
           >
             {mobileSearchOpen ? <X size={18} /> : <Search size={18} />}
           </button>
+
+          {activeDownloadCount > 0 && (
+            <button
+              className="sync-pill syncing"
+              onClick={() => navigateTab("mylist")}
+              title="View active in-app downloads"
+            >
+              <Download size={14} />
+              <span className="sync-text-full">
+                {activeDownloadCount} Downloading ({activeDownloadAvgPct}%)
+              </span>
+              <span className="sync-text-short">{activeDownloadAvgPct}%</span>
+            </button>
+          )}
 
           <button
             className={`sync-pill ${sync.running ? "syncing" : ""}`}
@@ -641,9 +844,22 @@ export default function App() {
                               <Play size={15} fill="currentColor" />
                             </button>
                           )}
-                          <a className="icon-btn" href={buildDownloadUrl(r.url)}>
+                          <button
+                            className="icon-btn"
+                            onClick={() =>
+                              setPendingDownload({
+                                title: r.name,
+                                fileName: r.name,
+                                url: r.url,
+                                size: r.size || 0,
+                                quality: "HD",
+                                serverLabel: "Direct Server",
+                              })
+                            }
+                            title="In-App Download"
+                          >
                             <Download size={15} />
-                          </a>
+                          </button>
                         </div>
                       )}
                     </div>
@@ -704,14 +920,115 @@ export default function App() {
           </div>
         )}
 
-        {/* MY LIST & HISTORY VIEW */}
+        {/* MY LIST, DOWNLOADS & HISTORY VIEW */}
         {tab === "mylist" && (
           <div className="container">
             <div className="browse-header">
-              <h1 className="browse-title">My Watchlist &amp; History</h1>
+              <h1 className="browse-title">Downloads, Watchlist &amp; History</h1>
               <div className="browse-count">
-                Saved locally in your personal CineVault database.
+                Track active in-app downloads, watch progress, and saved titles locally on your device.
               </div>
+
+              {/* CURRENT DOWNLOADING FILES SECTION */}
+              <section className="section downloads-section-card">
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <div>
+                    <h2 className="section-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Download size={18} color="var(--sky)" />
+                      Current Downloads ({downloads.length})
+                      {activeDownloadCount > 0 && (
+                        <span className="badge badge-sky" style={{ fontSize: 11 }}>
+                          {activeDownloadCount} active
+                        </span>
+                      )}
+                    </h2>
+                  </div>
+                  {downloads.some((d) => d.status !== "downloading") && (
+                    <button
+                      className="btn btn-glass btn-sm"
+                      onClick={() => setDownloads((prev) => prev.filter((d) => d.status === "downloading"))}
+                    >
+                      Clear Finished
+                    </button>
+                  )}
+                </div>
+
+                {downloads.length === 0 ? (
+                  <div style={{ color: "var(--text-muted)", fontSize: 13.5, padding: "8px 2px" }}>
+                    No active downloads. Click the Download icon on any movie, episode, or inside the player to download with live progress here.
+                  </div>
+                ) : (
+                  <div className="downloads-list">
+                    {downloads.map((dl) => (
+                      <div className={`download-row status-${dl.status}`} key={dl.id}>
+                        <div className="download-row-top">
+                          <div className="download-row-title" title={dl.fileName}>
+                            {dl.title}
+                            {dl.episodeLabel ? ` · ${dl.episodeLabel}` : ""}
+                          </div>
+                          <span className={`download-status-pill ${dl.status}`}>
+                            {dl.status === "downloading"
+                              ? `${dl.percent}%`
+                              : dl.status === "completed"
+                                ? "Completed"
+                                : dl.status === "canceled"
+                                  ? "Canceled"
+                                  : "Failed"}
+                          </span>
+                        </div>
+                        <div className="download-row-sub">
+                          <span>
+                            {dl.quality} · {dl.serverLabel}
+                          </span>
+                          {dl.total > 0 ? (
+                            <span>
+                              {" "}· {formatBytes(dl.downloaded)} / {formatBytes(dl.total)}
+                            </span>
+                          ) : dl.downloaded > 0 ? (
+                            <span> · {formatBytes(dl.downloaded)} downloaded</span>
+                          ) : null}
+                          {dl.status === "downloading" && dl.speedBps > 0 && (
+                            <span style={{ color: "var(--sky)" }}>
+                              {" "}· {formatBytes(dl.speedBps)}/s
+                            </span>
+                          )}
+                          {dl.error && <span style={{ color: "#fca5a5" }}> · {dl.error}</span>}
+                        </div>
+                        <div className="download-progress-track">
+                          <div
+                            className={`download-progress-fill ${dl.status}`}
+                            style={{ width: `${dl.status === "completed" ? 100 : dl.percent}%` }}
+                          />
+                        </div>
+                        <div className="download-row-actions">
+                          {dl.status === "downloading" ? (
+                            <button className="danger-outline-btn" onClick={() => cancelInAppDownload(dl.id)}>
+                              Cancel
+                            </button>
+                          ) : (
+                            <>
+                              {(dl.status === "failed" || dl.status === "canceled") && (
+                                <button
+                                  className="btn btn-glass btn-sm"
+                                  onClick={() => {
+                                    removeDownloadItem(dl.id);
+                                    startInAppDownload(dl, "stream");
+                                  }}
+                                >
+                                  Retry
+                                </button>
+                              )}
+                              <button className="danger-outline-btn" onClick={() => removeDownloadItem(dl.id)}>
+                                Remove
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
 
               {historyList.length > 0 && (
                 <CarouselRow
@@ -804,6 +1121,7 @@ export default function App() {
             setActiveDetail(null);
             setPlayerSession(session);
           }}
+          onRequestDownload={(req) => setPendingDownload(req)}
           onToggleWatchlist={handleToggleWatchlist}
           onNotify={notify}
         />
@@ -818,6 +1136,7 @@ export default function App() {
             loadHome();
           }}
           onProgressSaved={loadHome}
+          onRequestDownload={(req) => setPendingDownload(req)}
           onSwitchEpisode={(nextIndex) => {
             const nextFile = playerSession.playlist?.[nextIndex];
             if (!nextFile) return;
@@ -850,6 +1169,65 @@ export default function App() {
           onTriggerSync={handleTriggerSync}
           onNotify={notify}
         />
+      )}
+
+      {/* IN-APP DOWNLOAD OPTIONS MODAL */}
+      {pendingDownload && (
+        <div
+          className="modal-backdrop"
+          style={{ zIndex: 260 }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPendingDownload(null);
+          }}
+        >
+          <div className="download-options-modal">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ fontFamily: "Outfit, sans-serif", fontSize: 18, margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                <Download size={18} color="var(--sky)" /> Download Options
+              </h3>
+              <button className="icon-btn" onClick={() => setPendingDownload(null)} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+              {pendingDownload.title}
+              {pendingDownload.episodeLabel ? ` · ${pendingDownload.episodeLabel}` : ""}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 16 }}>
+              <div>File: {pendingDownload.fileName}</div>
+              <div>
+                Source: {pendingDownload.quality} · {pendingDownload.serverLabel}
+                {pendingDownload.size > 0 ? ` · ${formatBytes(pendingDownload.size)}` : ""}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button
+                className="btn btn-primary"
+                style={{ width: "100%", justifyContent: "center" }}
+                onClick={() => startInAppDownload(pendingDownload, "stream")}
+              >
+                <Download size={16} /> Start In-App Download (Live Progress)
+              </button>
+              <button
+                className="btn btn-glass"
+                style={{ width: "100%", justifyContent: "center" }}
+                onClick={() => startInAppDownload(pendingDownload, "direct")}
+              >
+                Direct Background Save (No New Tab)
+              </button>
+              <button
+                className="btn btn-glass btn-sm"
+                style={{ width: "100%", justifyContent: "center" }}
+                onClick={() => {
+                  setPendingDownload(null);
+                  navigateTab("mylist");
+                }}
+              >
+                View Current Downloads ({downloads.length})
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* TOASTS */}

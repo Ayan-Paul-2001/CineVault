@@ -144,6 +144,72 @@
             android:textSize="10.5sp" />
     </LinearLayout>
 
+    <!-- Double-Tap Left Rewind (-10s) Indicator -->
+    <LinearLayout
+        android:id="@+id/player_double_tap_left"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical|start"
+        android:layout_marginStart="42dp"
+        android:background="@drawable/bg_card_rounded"
+        android:elevation="9dp"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingHorizontal="20dp"
+        android:paddingVertical="14dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:contentDescription="Rewind"
+            android:src="@drawable/ic_replay_10"
+            app:tint="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/double_tap_left_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="-10s"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- Double-Tap Right Forward (+10s) Indicator -->
+    <LinearLayout
+        android:id="@+id/player_double_tap_right"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical|end"
+        android:layout_marginEnd="42dp"
+        android:background="@drawable/bg_card_rounded"
+        android:elevation="9dp"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingHorizontal="20dp"
+        android:paddingVertical="14dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:contentDescription="Forward"
+            android:src="@drawable/ic_forward_10"
+            app:tint="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/double_tap_right_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="+10s"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
     <ProgressBar
         android:id="@+id/player_buffering"
         android:layout_width="48dp"
@@ -336,6 +402,20 @@
                         android:textSize="12.5sp"
                         android:textStyle="bold"
                         android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/btn_player_speed"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="6dp"
+                        android:text="1x"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/btn_player_scale"

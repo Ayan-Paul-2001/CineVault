@@ -1,22 +1,23 @@
 package com.cinevault.app.ui;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.CheckBox;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.TooltipCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -25,6 +26,7 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.cinevault.app.CineVaultApp;
 import com.cinevault.app.R;
+import com.cinevault.app.data.MediaDownloadManager;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 import com.google.android.material.button.MaterialButton;
@@ -43,7 +45,7 @@ import java.util.Set;
 
 /**
  * Title Detail screen displaying ALL merged server qualities, quality filter chips,
- * multi-season episodes, plot/cast enrichment, Play, VLC external play, Download, Copy URL, and Watchlist.
+ * multi-season episodes, plot/cast enrichment, Play, VLC external play, Download, and Watchlist.
  */
 public final class DetailActivity extends AppCompatActivity {
     public static final String EXTRA_ITEM_ID = "item_id";
@@ -442,29 +444,10 @@ public final class DetailActivity extends AppCompatActivity {
         UiHelper.applyTvFocusEffect(vlcBtn, 1.05f);
         actions.addView(vlcBtn);
 
-        MaterialButton dlBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
-        dlBtn.setText("DL");
-        dlBtn.setAllCaps(false);
-        LinearLayout.LayoutParams dp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 40));
-        dp.leftMargin = UiHelper.dp(this, 6);
-        dlBtn.setLayoutParams(dp);
-        dlBtn.setOnClickListener(v -> UiHelper.openExternalBrowser(this, file.url, false));
+        MaterialButton dlBtn = createDownloadIconButton(UiHelper.dp(this, 6), 0);
+        dlBtn.setOnClickListener(v -> showDownloadOptionsDialog(file, fq, ed.serverLabel, null, ed.subtitles));
         UiHelper.applyTvFocusEffect(dlBtn, 1.05f);
         actions.addView(dlBtn);
-
-        MaterialButton copyBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
-        copyBtn.setText("Copy");
-        copyBtn.setAllCaps(false);
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 40));
-        cp.leftMargin = UiHelper.dp(this, 6);
-        copyBtn.setLayoutParams(cp);
-        copyBtn.setOnClickListener(v -> {
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("CineVault URL", file.url));
-            Toast.makeText(this, "Direct stream URL copied", Toast.LENGTH_SHORT).show();
-        });
-        UiHelper.applyTvFocusEffect(copyBtn, 1.05f);
-        actions.addView(copyBtn);
 
         card.addView(actions);
         return card;
@@ -583,6 +566,12 @@ public final class DetailActivity extends AppCompatActivity {
             mid.addView(esub);
             row.addView(mid);
 
+            String epQuality = ep.quality != null ? ep.quality : (bundle.item.quality != null ? bundle.item.quality : "HD");
+            MaterialButton epDlBtn = createDownloadIconButton(0, UiHelper.dp(this, 6));
+            epDlBtn.setOnClickListener(v -> showDownloadOptionsDialog(ep, epQuality, srv, active.name, active.subtitles));
+            UiHelper.applyTvFocusEffect(epDlBtn, 1.05f);
+            row.addView(epDlBtn);
+
             MaterialButton pbtn = new MaterialButton(this);
             pbtn.setText("Play");
             pbtn.setAllCaps(false);
@@ -590,8 +579,7 @@ public final class DetailActivity extends AppCompatActivity {
             pbtn.setTextColor(Color.WHITE);
             pbtn.setOnClickListener(v -> launchPlayer(new Models.PlaybackSession(
                     bundle.item.id, bundle.item.title, ep, active.subtitles, active.name,
-                    active.episodes, epIdx,
-                    ep.quality != null ? ep.quality : (bundle.item.quality != null ? bundle.item.quality : "HD"),
+                    active.episodes, epIdx, epQuality,
                     srv, Collections.emptyList(),
                     hist != null && !hist.completed ? hist.position : 0)));
             UiHelper.applyTvFocusEffect(pbtn, 1.05f);
@@ -599,6 +587,26 @@ public final class DetailActivity extends AppCompatActivity {
 
             episodesList.addView(row);
         }
+    }
+
+    private MaterialButton createDownloadIconButton(int leftMarginPx, int rightMarginPx) {
+        MaterialButton btn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+        btn.setText("");
+        btn.setIconResource(R.drawable.ic_download);
+        btn.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
+        btn.setIconPadding(0);
+        btn.setIconSize(UiHelper.dp(this, 20));
+        btn.setIconTint(ColorStateList.valueOf(0xFFF3F6FC));
+        btn.setPadding(0, 0, 0, 0);
+        btn.setMinWidth(0);
+        btn.setMinimumWidth(0);
+        btn.setContentDescription("Download");
+        TooltipCompat.setTooltipText(btn, "Download");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(UiHelper.dp(this, 44), UiHelper.dp(this, 40));
+        lp.leftMargin = leftMarginPx;
+        lp.rightMargin = rightMarginPx;
+        btn.setLayoutParams(lp);
+        return btn;
     }
 
     private void addSimpleChip(ChipGroup group, String label, boolean selected, Runnable onClick) {
@@ -610,6 +618,92 @@ public final class DetailActivity extends AppCompatActivity {
         chip.setOnClickListener(v -> onClick.run());
         UiHelper.applyTvFocusEffect(chip, 1.05f);
         group.addView(chip);
+    }
+
+    private void showDownloadOptionsDialog(Models.MediaFileEntry file, String quality,
+                                           String serverLabel, String seasonName,
+                                           List<Models.MediaFileEntry> subtitles) {
+        if (file == null || !ServerConfig.isAllowedUrl(file.url)) {
+            Toast.makeText(this, "Blocked untrusted download URL.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String displayTitle = bundle != null ? bundle.item.title : file.name;
+        long mediaId = bundle != null ? bundle.item.id : 0L;
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = UiHelper.dp(this, 20);
+        box.setPadding(pad, UiHelper.dp(this, 12), pad, UiHelper.dp(this, 6));
+
+        TextView fileTv = new TextView(this);
+        StringBuilder meta = new StringBuilder();
+        meta.append("File: ").append(file.name);
+        meta.append("\nSource: ").append(quality != null ? quality : "HD")
+                .append(" · ").append(serverLabel != null ? serverLabel : "CineVault");
+        if (seasonName != null && !seasonName.isEmpty()) {
+            meta.append(" · ").append(seasonName);
+            if (!file.label.isEmpty()) meta.append(" ").append(file.label);
+        }
+        meta.append("\nSize: ").append(file.size > 0 ? Models.formatBytes(file.size) : "Detected on start");
+        meta.append("\nSave to: ").append(MediaDownloadManager.saveLocationHint());
+        fileTv.setText(meta.toString());
+        fileTv.setTextColor(0xFFCBD5E1);
+        fileTv.setTextSize(13f);
+        fileTv.setLineSpacing(UiHelper.dp(this, 3), 1f);
+        box.addView(fileTv);
+
+        CheckBox cbWifiOnly = new CheckBox(this);
+        cbWifiOnly.setText("Download on Wi-Fi only");
+        cbWifiOnly.setTextColor(0xFFF3F6FC);
+        cbWifiOnly.setChecked(false);
+        LinearLayout.LayoutParams lpWifi = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lpWifi.topMargin = UiHelper.dp(this, 12);
+        cbWifiOnly.setLayoutParams(lpWifi);
+        box.addView(cbWifiOnly);
+
+        CheckBox cbSubs = null;
+        if (subtitles != null && !subtitles.isEmpty()) {
+            cbSubs = new CheckBox(this);
+            cbSubs.setText("Also download external subtitle (.srt/.vtt)");
+            cbSubs.setTextColor(0xFFF3F6FC);
+            cbSubs.setChecked(true);
+            box.addView(cbSubs);
+        }
+
+        final CheckBox finalCbSubs = cbSubs;
+        new AlertDialog.Builder(this)
+                .setTitle("In-App Download Options")
+                .setView(box)
+                .setPositiveButton("Start Download", (d, w) -> {
+                    boolean wifiOnly = cbWifiOnly.isChecked();
+                    List<Models.MediaFileEntry> subs = (finalCbSubs != null && finalCbSubs.isChecked())
+                            ? subtitles : Collections.emptyList();
+                    app.ioExecutor.execute(() -> {
+                        long did = MediaDownloadManager.enqueueMediaDownload(
+                                DetailActivity.this, app.repository.db, mediaId, displayTitle,
+                                file, quality, serverLabel, seasonName, wifiOnly, subs);
+                        app.mainHandler.post(() -> {
+                            if (did > 0) {
+                                Toast.makeText(DetailActivity.this,
+                                        "Downloading inside CineVault — track progress in My List -> Downloads",
+                                        Toast.LENGTH_LONG).show();
+                            } else {
+                                Toast.makeText(DetailActivity.this,
+                                        "Could not start download. Check storage or connection.",
+                                        Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    });
+                })
+                .setNeutralButton("View Downloads", (d, w) -> {
+                    Intent i = new Intent(DetailActivity.this, MainActivity.class);
+                    i.putExtra(MainActivity.EXTRA_OPEN_TAB, 3);
+                    i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    startActivity(i);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void launchPlayer(Models.PlaybackSession session) {

@@ -1,11 +1,32 @@
-import React, { useState } from "react";
+import React, { useState, memo } from "react";
 import { SlidersHorizontal, ChevronDown, ChevronUp, RotateCcw, X } from "lucide-react";
 
-export default function FilterPanel({
+const QUALITY_OPTIONS = [
+  { value: "4K", label: "4K Ultra HD" },
+  { value: "1080p", label: "1080p Full HD" },
+  { value: "720p", label: "720p HD" },
+  { value: "3D", label: "3D Movies" },
+];
+
+const AUDIO_OPTIONS = [
+  { value: "dual", label: "Dual Audio" },
+  { value: "multi", label: "Multi Audio" },
+  { value: "hindi-dubbed", label: "Hindi Dubbed" },
+];
+
+const SERVER_OPTIONS = [
+  { value: "icc", label: "ICC FTP Primary" },
+  { value: "dhakaflix", label: "DhakaFlix Primary" },
+  { value: "circleftp", label: "CircleFTP Primary" },
+  { value: "discoveryftp", label: "DiscoveryFTP Primary" },
+];
+
+const FilterPanel = memo(function FilterPanel({
   tab,
   categories,
   years,
   languages,
+  facets = null,
   filters,
   onChangeFilters,
   onReset,
@@ -134,7 +155,7 @@ export default function FilterPanel({
                 onClick={() =>
                   onChangeFilters({
                     category: "",
-                    sort: filters.sort === "imdb" ? "recent" : filters.sort,
+                    sort: filters.sort === "imdb" ? (tab === "search" ? "relevance" : "recent") : filters.sort,
                     page: 1,
                   })
                 }
@@ -144,6 +165,12 @@ export default function FilterPanel({
                   : tab === "series"
                     ? "All Series"
                     : "All Sections"}
+                {tab === "search" && facets && (
+                  <span className="pill-count">
+                    ({facets.totalUnfiltered.toLocaleString()}
+                    {facets.capped ? "+" : ""})
+                  </span>
+                )}
               </button>
               {categories.map((c) => (
                 <button
@@ -156,7 +183,9 @@ export default function FilterPanel({
                         c.id === "imdb-top-250"
                           ? "imdb"
                           : filters.sort === "imdb"
-                            ? "recent"
+                            ? tab === "search"
+                              ? "relevance"
+                              : "recent"
                             : filters.sort,
                       page: 1,
                     })
@@ -183,11 +212,14 @@ export default function FilterPanel({
                 onChange={(e) => onChangeFilters({ year: e.target.value, page: 1 })}
               >
                 <option value="">All Years</option>
-                {years.map((y) => (
-                  <option key={y} value={y}>
-                    {y}
-                  </option>
-                ))}
+                {years.map((y) => {
+                  const yc = facets?.yearCounts?.[y];
+                  return (
+                    <option key={y} value={y}>
+                      {yc != null ? `${y} (${yc.toLocaleString()})` : y}
+                    </option>
+                  );
+                })}
               </select>
             </label>
 
@@ -199,10 +231,16 @@ export default function FilterPanel({
                 onChange={(e) => onChangeFilters({ quality: e.target.value, page: 1 })}
               >
                 <option value="">All Quality</option>
-                <option value="4K">4K Ultra HD</option>
-                <option value="1080p">1080p Full HD</option>
-                <option value="720p">720p HD</option>
-                <option value="3D">3D Movies</option>
+                {QUALITY_OPTIONS.filter(
+                  (o) => !facets || (facets.qualities?.[o.value] || 0) > 0 || filters.quality === o.value
+                ).map((o) => {
+                  const cnt = facets?.qualities?.[o.value];
+                  return (
+                    <option key={o.value} value={o.value}>
+                      {cnt != null ? `${o.label} (${cnt.toLocaleString()})` : o.label}
+                    </option>
+                  );
+                })}
               </select>
             </label>
 
@@ -214,9 +252,16 @@ export default function FilterPanel({
                 onChange={(e) => onChangeFilters({ audio: e.target.value, page: 1 })}
               >
                 <option value="">All Audio</option>
-                <option value="dual">Dual Audio</option>
-                <option value="multi">Multi Audio</option>
-                <option value="hindi-dubbed">Hindi Dubbed</option>
+                {AUDIO_OPTIONS.filter(
+                  (o) => !facets || (facets.audios?.[o.value] || 0) > 0 || filters.audio === o.value
+                ).map((o) => {
+                  const cnt = facets?.audios?.[o.value];
+                  return (
+                    <option key={o.value} value={o.value}>
+                      {cnt != null ? `${o.label} (${cnt.toLocaleString()})` : o.label}
+                    </option>
+                  );
+                })}
               </select>
             </label>
 
@@ -244,10 +289,16 @@ export default function FilterPanel({
                 onChange={(e) => onChangeFilters({ source: e.target.value, page: 1 })}
               >
                 <option value="">All Servers (Merged)</option>
-                <option value="icc">ICC FTP Primary</option>
-                <option value="dhakaflix">DhakaFlix Primary</option>
-                <option value="circleftp">CircleFTP Primary</option>
-                <option value="discoveryftp">DiscoveryFTP Primary</option>
+                {SERVER_OPTIONS.filter(
+                  (o) => !facets || (facets.sources?.[o.value] || 0) > 0 || filters.source === o.value
+                ).map((o) => {
+                  const cnt = facets?.sources?.[o.value];
+                  return (
+                    <option key={o.value} value={o.value}>
+                      {cnt != null ? `${o.label} (${cnt.toLocaleString()})` : o.label}
+                    </option>
+                  );
+                })}
               </select>
             </label>
 
@@ -272,4 +323,6 @@ export default function FilterPanel({
       )}
     </section>
   );
-}
+});
+
+export default FilterPanel;

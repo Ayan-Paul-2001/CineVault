@@ -20,8 +20,8 @@ function deviceHeaders(extra = {}) {
   return { "X-CineVault-Device-Id": getDeviceId(), ...extra };
 }
 
-export async function apiGet(path) {
-  const res = await fetch(path, { headers: deviceHeaders() });
+export async function apiGet(path, opts = {}) {
+  const res = await fetch(path, { headers: deviceHeaders(), signal: opts.signal });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `HTTP ${res.status}`);

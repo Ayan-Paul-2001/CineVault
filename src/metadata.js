@@ -1,15 +1,127 @@
+import fs from "node:fs";
+import path from "node:path";
 import { listDirectory, mapWithConcurrency } from "./h5ai.js";
 import { fetchIccPlayerDetails } from "./icc.js";
 import { fetchCirclePostDetails } from "./circleftp.js";
 import { parseEpisodeFile } from "./parser.js";
 import { getItemById, getMergedMirrors, updateItemHydration, updateItemMetadata } from "./db.js";
-import { isAllowedUrl, ICC_ORIGIN } from "./config.js";
+import { DATA_DIR, isAllowedUrl, ICC_ORIGIN } from "./config.js";
+
+const POSTER_CACHE_DIR = path.join(DATA_DIR, "posters");
+try {
+  fs.mkdirSync(POSTER_CACHE_DIR, { recursive: true });
+} catch {}
 
 const inFlightHydrations = new Map();
 const inFlightEnrichments = new Map();
+const inFlightPosters = new Map();
+const posterMemCache = new Map(); // id -> { buf, contentType }
+const posterMissCache = new Map(); // id -> expiresAt
+const MAX_POSTER_MEM_ENTRIES = 400;
+const POSTER_MISS_TTL_MS = 10 * 60 * 1000;
+
 let activeHydrateSlots = 0;
 const MAX_HYDRATE_CONCURRENCY = 10;
 const waitQueue = [];
+
+let activePosterFetchSlots = 0;
+const MAX_POSTER_FETCH_CONCURRENCY = 8;
+const posterFetchQueue = [];
+
+let activePosterHydrateSlots = 0;
+const MAX_POSTER_HYDRATE_CONCURRENCY = 4;
+const bgPosterHydrateIds = new Set();
+const bgPosterHydrateQueue = [];
+let bgPosterWorkersRunning = 0;
+
+function acquirePosterFetchSlot() {
+  if (activePosterFetchSlots < MAX_POSTER_FETCH_CONCURRENCY) {
+    activePosterFetchSlots++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => posterFetchQueue.push(resolve));
+}
+
+function releasePosterFetchSlot() {
+  const next = posterFetchQueue.shift();
+  if (next) next();
+  else activePosterFetchSlots = Math.max(0, activePosterFetchSlots - 1);
+}
+
+function detectImageMime(buf, fallback = "image/jpeg") {
+  if (!buf || buf.length < 12) return fallback;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45) return "image/webp";
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return "image/gif";
+  return fallback;
+}
+
+function getPosterDiskPath(id) {
+  return path.join(POSTER_CACHE_DIR, `${id}.bin`);
+}
+
+function putPosterMemCache(id, entry) {
+  if (posterMemCache.has(id)) posterMemCache.delete(id);
+  posterMemCache.set(id, entry);
+  if (posterMemCache.size > MAX_POSTER_MEM_ENTRIES) {
+    const oldestKey = posterMemCache.keys().next().value;
+    if (oldestKey !== undefined) posterMemCache.delete(oldestKey);
+  }
+}
+
+async function readPosterCache(id) {
+  const mem = posterMemCache.get(id);
+  if (mem) {
+    // Refresh LRU order
+    posterMemCache.delete(id);
+    posterMemCache.set(id, mem);
+    return mem;
+  }
+  const diskPath = getPosterDiskPath(id);
+  try {
+    const buf = await fs.promises.readFile(diskPath);
+    if (buf.length > 500) {
+      const entry = { buf, contentType: detectImageMime(buf) };
+      putPosterMemCache(id, entry);
+      return entry;
+    }
+  } catch {}
+  return null;
+}
+
+function writePosterCache(id, buf, contentType) {
+  const entry = { buf, contentType: detectImageMime(buf, contentType) };
+  putPosterMemCache(id, entry);
+  fs.promises.writeFile(getPosterDiskPath(id), buf).catch(() => {});
+  return entry;
+}
+
+function scheduleBackgroundPosterHydrate(id) {
+  if (bgPosterHydrateIds.has(id) || bgPosterHydrateQueue.length >= 48) return;
+  bgPosterHydrateIds.add(id);
+  bgPosterHydrateQueue.push(id);
+  drainBackgroundPosterHydrate();
+}
+
+function drainBackgroundPosterHydrate() {
+  while (bgPosterWorkersRunning < 2 && bgPosterHydrateQueue.length > 0) {
+    const nextId = bgPosterHydrateQueue.shift();
+    bgPosterWorkersRunning++;
+    (async () => {
+      try {
+        const hydrated = await hydrateItem(nextId, { deep: false });
+        if (hydrated?.poster_url) {
+          await fetchAndCacheUpstreamPoster(nextId, hydrated.poster_url);
+        }
+      } catch {} finally {
+        bgPosterHydrateIds.delete(nextId);
+        bgPosterWorkersRunning--;
+        if (bgPosterHydrateQueue.length > 0) drainBackgroundPosterHydrate();
+      }
+    })();
+  }
+}
 
 function acquireSlot() {
   if (activeHydrateSlots < MAX_HYDRATE_CONCURRENCY) {
@@ -311,56 +423,67 @@ export async function enrichItemMetadata(item) {
     try {
       const cleanQuery = item.title.replace(/[:\-–—]/g, " ").replace(/\s+/g, " ").trim();
 
+      const tasks = [];
       if (item.media_type === "series" && !meta.overview) {
-        try {
-          const r = await fetch(
-            `https://api.tvmaze.com/search/shows?q=${encodeURIComponent(cleanQuery)}`,
-            { signal: AbortSignal.timeout(4500), headers: { "User-Agent": "CineVault/1.0" } }
-          );
-          if (r.ok) {
-            const list = await r.json();
-            const match = pickBestTvMazeMatch(list, item.year);
-            if (match?.show) {
-              const s = match.show;
-              meta.overview = meta.overview || stripHtml(s.summary);
-              meta.genres = meta.genres?.length ? meta.genres : Array.isArray(s.genres) ? s.genres : [];
-              meta.rating = meta.rating || s.rating?.average || null;
-              meta.runtime = meta.runtime || s.averageRuntime || s.runtime || null;
-              meta.status = s.status || null;
-              meta.network = s.network?.name || s.webChannel?.name || null;
-              meta.imdbId = meta.imdbId || s.externals?.imdb || null;
-              meta.source = meta.source || "TVMaze";
-              if (s.image?.original || s.image?.medium) {
-                fallbackPoster = s.image.original || s.image.medium;
+        tasks.push(
+          (async () => {
+            try {
+              const r = await fetch(
+                `https://api.tvmaze.com/search/shows?q=${encodeURIComponent(cleanQuery)}`,
+                { signal: AbortSignal.timeout(2800), headers: { "User-Agent": "CineVault/1.0" } }
+              );
+              if (r.ok) {
+                const list = await r.json();
+                const match = pickBestTvMazeMatch(list, item.year);
+                if (match?.show) {
+                  const s = match.show;
+                  meta.overview = meta.overview || stripHtml(s.summary);
+                  meta.genres = meta.genres?.length ? meta.genres : Array.isArray(s.genres) ? s.genres : [];
+                  meta.rating = meta.rating || s.rating?.average || null;
+                  meta.runtime = meta.runtime || s.averageRuntime || s.runtime || null;
+                  meta.status = s.status || null;
+                  meta.network = s.network?.name || s.webChannel?.name || null;
+                  meta.imdbId = meta.imdbId || s.externals?.imdb || null;
+                  meta.source = meta.source || "TVMaze";
+                  if (s.image?.original || s.image?.medium) {
+                    fallbackPoster = s.image.original || s.image.medium;
+                  }
+                }
               }
-            }
-          }
-        } catch {}
+            } catch {}
+          })()
+        );
       }
 
       if (!meta.imdbId || !meta.cast) {
-        try {
-          const qNorm = cleanQuery.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
-          const firstChar = /^[a-z0-9]/.test(qNorm) ? qNorm[0] : "x";
-          const slug = encodeURIComponent(qNorm.slice(0, 60));
-          const r = await fetch(
-            `https://v3.sg.media-imdb.com/suggestion/${firstChar}/${slug}.json`,
-            { signal: AbortSignal.timeout(4500), headers: { "User-Agent": "CineVault/1.0" } }
-          );
-          if (r.ok) {
-            const data = await r.json();
-            const best = pickBestImdbMatch(data.d || [], item.year, item.media_type);
-            if (best) {
-              if (!meta.imdbId && best.id?.startsWith("tt")) meta.imdbId = best.id;
-              if (!meta.cast && best.s) meta.cast = best.s;
-              if (!meta.source) meta.source = "IMDb";
-              if (!fallbackPoster && best.i?.imageUrl) {
-                fallbackPoster = best.i.imageUrl.replace(/\._V1_.*\.jpg$/i, "._V1_UX600_.jpg");
+        tasks.push(
+          (async () => {
+            try {
+              const qNorm = cleanQuery.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+              const firstChar = /^[a-z0-9]/.test(qNorm) ? qNorm[0] : "x";
+              const slug = encodeURIComponent(qNorm.slice(0, 60));
+              const r = await fetch(
+                `https://v3.sg.media-imdb.com/suggestion/${firstChar}/${slug}.json`,
+                { signal: AbortSignal.timeout(2800), headers: { "User-Agent": "CineVault/1.0" } }
+              );
+              if (r.ok) {
+                const data = await r.json();
+                const best = pickBestImdbMatch(data.d || [], item.year, item.media_type);
+                if (best) {
+                  if (!meta.imdbId && best.id?.startsWith("tt")) meta.imdbId = best.id;
+                  if (!meta.cast && best.s) meta.cast = best.s;
+                  if (!meta.source) meta.source = "IMDb";
+                  if (!fallbackPoster && best.i?.imageUrl) {
+                    fallbackPoster = best.i.imageUrl.replace(/\._V1_.*\.jpg$/i, "._V1_UX600_.jpg");
+                  }
+                }
               }
-            }
-          }
-        } catch {}
+            } catch {}
+          })()
+        );
       }
+
+      if (tasks.length > 0) await Promise.all(tasks);
 
       if (!meta.overview) {
         const wikiCandidates = [
@@ -373,7 +496,7 @@ export async function enrichItemMetadata(item) {
           try {
             const r = await fetch(
               `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(candidate.replace(/\s+/g, "_"))}`,
-              { signal: AbortSignal.timeout(3500), headers: { "User-Agent": "CineVault/1.0 (personal-media-server)" } }
+              { signal: AbortSignal.timeout(2200), headers: { "User-Agent": "CineVault/1.0 (personal-media-server)" } }
             );
             if (r.ok) {
               const w = await r.json();
@@ -434,10 +557,61 @@ function stripHtml(html) {
   return html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() || null;
 }
 
+function isAllowedPosterSource(posterUrl) {
+  return Boolean(
+    posterUrl &&
+      (isAllowedUrl(posterUrl) ||
+        posterUrl.startsWith("https://m.media-amazon.com/") ||
+        posterUrl.startsWith("https://static.tvmaze.com/"))
+  );
+}
+
+async function fetchAndCacheUpstreamPoster(id, posterUrl) {
+  if (!isAllowedPosterSource(posterUrl)) return null;
+  if (inFlightPosters.has(id)) return inFlightPosters.get(id);
+
+  const promise = (async () => {
+    await acquirePosterFetchSlot();
+    try {
+      const headers = posterUrl.startsWith(ICC_ORIGIN) ? { Referer: `${ICC_ORIGIN}/` } : {};
+      const upstream = await fetch(posterUrl, { headers, signal: AbortSignal.timeout(3500) });
+      if (upstream.ok) {
+        const contentType = upstream.headers.get("content-type") || "image/jpeg";
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        if (buf.length > 500) {
+          posterMissCache.delete(id);
+          return writePosterCache(id, buf, contentType);
+        }
+      }
+    } catch {} finally {
+      releasePosterFetchSlot();
+      inFlightPosters.delete(id);
+    }
+    posterMissCache.set(id, Date.now() + POSTER_MISS_TTL_MS);
+    return null;
+  })();
+
+  inFlightPosters.set(id, promise);
+  return promise;
+}
+
 /**
- * Serve poster from DhakaFlix / ICC FTP (or external fallback, or generated Cinema SVG poster).
+ * Serve poster from RAM/Disk cache -> DhakaFlix/ICC/CircleFTP/DiscoveryFTP -> instant Cinema SVG fallback.
+ * Never blocks browser connections on slow external IMDb/Wikipedia enrichment or unbounded upstream queues.
  */
 export async function servePoster(id, res) {
+  // 1. Instant RAM or disk cache hit (<1ms, zero DB or upstream network!)
+  const cached = await readPosterCache(id);
+  if (cached) {
+    res.writeHead(200, {
+      "Content-Type": cached.contentType,
+      "Content-Length": cached.buf.length,
+      "Cache-Control": "public, max-age=2592000, immutable",
+    });
+    res.end(cached.buf);
+    return;
+  }
+
   let item = getItemById(id);
   if (!item) {
     res.writeHead(404);
@@ -445,45 +619,61 @@ export async function servePoster(id, res) {
     return;
   }
 
+  // 2. Skip recently failed upstream fetches immediately so scrolling never stalls
+  const missUntil = posterMissCache.get(id);
+  if (missUntil && missUntil > Date.now()) {
+    const svg = generateFallbackPosterSvg(item);
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Content-Length": Buffer.byteLength(svg),
+      "Cache-Control": "public, max-age=600",
+    });
+    res.end(svg);
+    return;
+  }
+
+  // 3. If item has no poster_url yet, try a fast bounded hydration (max 1.8s) or warm in background
+  let warmedInBg = false;
   if (!item.poster_url && !item.poster_checked) {
-    item = await hydrateItem(id, { deep: false });
-  }
-
-  if (item && !item.poster_url && !item.meta_checked) {
-    await enrichItemMetadata(item);
-    item = getItemById(id);
-  }
-
-  const posterUrl = item?.poster_url;
-  if (
-    posterUrl &&
-    (isAllowedUrl(posterUrl) ||
-      posterUrl.startsWith("https://m.media-amazon.com/") ||
-      posterUrl.startsWith("https://static.tvmaze.com/"))
-  ) {
-    try {
-      const headers = posterUrl.startsWith(ICC_ORIGIN) ? { Referer: `${ICC_ORIGIN}/` } : {};
-      const upstream = await fetch(posterUrl, { headers, signal: AbortSignal.timeout(7000) });
-      if (upstream.ok) {
-        const contentType = upstream.headers.get("content-type") || "image/jpeg";
-        const buf = Buffer.from(await upstream.arrayBuffer());
-        if (buf.length > 500) {
-          res.writeHead(200, {
-            "Content-Type": contentType,
-            "Content-Length": buf.length,
-            "Cache-Control": "public, max-age=604800, immutable",
-          });
-          res.end(buf);
-          return;
-        }
+    if (activePosterHydrateSlots < MAX_POSTER_HYDRATE_CONCURRENCY) {
+      activePosterHydrateSlots++;
+      try {
+        const raced = await Promise.race([
+          hydrateItem(id, { deep: false }),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1800)),
+        ]);
+        if (raced) item = raced;
+        else warmedInBg = true;
+      } catch {} finally {
+        activePosterHydrateSlots = Math.max(0, activePosterHydrateSlots - 1);
       }
-    } catch {}
+    } else {
+      warmedInBg = true;
+      scheduleBackgroundPosterHydrate(id);
+    }
   }
 
+  // 4. Fetch & persist real poster if URL is available
+  const posterUrl = item?.poster_url;
+  if (isAllowedPosterSource(posterUrl)) {
+    const entry = await fetchAndCacheUpstreamPoster(id, posterUrl);
+    if (entry) {
+      res.writeHead(200, {
+        "Content-Type": entry.contentType,
+        "Content-Length": entry.buf.length,
+        "Cache-Control": "public, max-age=2592000, immutable",
+      });
+      res.end(entry.buf);
+      return;
+    }
+  }
+
+  // 5. Instant Cinema SVG fallback (short cache if background hydration is warming it)
   const svg = generateFallbackPosterSvg(item);
   res.writeHead(200, {
     "Content-Type": "image/svg+xml; charset=utf-8",
-    "Cache-Control": "public, max-age=3600",
+    "Content-Length": Buffer.byteLength(svg),
+    "Cache-Control": warmedInBg ? "public, max-age=60" : "public, max-age=3600",
   });
   res.end(svg);
 }

@@ -151,6 +151,7 @@ public final class UiHelper {
         }
         Glide.with(target.getContext())
                 .load(model)
+                .timeout(4000)
                 .centerCrop()
                 .into(target);
     }

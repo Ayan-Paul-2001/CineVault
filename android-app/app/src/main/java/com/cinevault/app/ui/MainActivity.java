@@ -57,6 +57,7 @@ import java.util.Date;
 import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Main navigation shell hosting:
@@ -89,7 +90,9 @@ public final class MainActivity extends AppCompatActivity {
     private int heroIndex = 0;
     private Models.HomeFeed homeFeed;
     private Models.LibraryStats latestStats = Models.LibraryStats.empty();
+    private Models.SearchFacets latestSearchFacets = null;
     private Models.BrowseFilter currentFilter = new Models.BrowseFilter();
+    private final AtomicInteger browseRequestSeq = new AtomicInteger(0);
     private Models.AppUpdateInfo availableUpdate;
     private String confirmClearTarget = null;
     private String lastLiveIccSearchQuery = "";
@@ -134,7 +137,10 @@ public final class MainActivity extends AppCompatActivity {
     private MediaCardAdapter browseAdapter;
     private MaterialButton btnPrevPage, btnNextPage;
     private final List<String> yearValues = new ArrayList<>();
+    private final List<String> qualityValues = new ArrayList<>();
+    private final List<String> audioValues = new ArrayList<>();
     private final List<String> langValues = new ArrayList<>();
+    private final List<String> serverValues = new ArrayList<>();
     private final List<String> sortValues = new ArrayList<>();
 
     // My List & In-App Downloads widgets
@@ -630,21 +636,25 @@ public final class MainActivity extends AppCompatActivity {
             @Override public void afterTextChanged(Editable s) {
                 if (pendingSearchRunnable != null) uiHandler.removeCallbacks(pendingSearchRunnable);
                 String q = s.toString().trim();
+                long delay = q.length() == 1 ? 250L : 150L;
                 pendingSearchRunnable = () -> {
                     if (q.isEmpty()) {
+                        latestSearchFacets = null;
                         if (currentTab == 4) switchTab(0, "", "", "recent");
                         return;
                     }
+                    latestSearchFacets = null;
                     currentTab = 4;
                     currentFilter = new Models.BrowseFilter();
                     currentFilter.query = q;
                     currentFilter.sort = "relevance";
+                    currentFilter.limit = 36;
                     showActiveTabView();
                     populateFilterControls();
                     loadBrowse();
                     boostSearchWithLiveIcc(q);
                 };
-                uiHandler.postDelayed(pendingSearchRunnable, 240);
+                uiHandler.postDelayed(pendingSearchRunnable, delay);
             }
         });
 
@@ -830,25 +840,43 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void setupSpinners() {
-        final List<String> qualityVals = Arrays.asList("", "4K", "1080p", "720p", "3D");
+        qualityValues.clear();
+        qualityValues.addAll(Arrays.asList("", "4K", "1080p", "720p", "3D"));
         setSpinnerItems(spinQuality, Arrays.asList("All Quality", "4K Ultra HD", "1080p Full HD", "720p HD", "3D Movies"));
 
-        final List<String> audioVals = Arrays.asList("", "dual", "multi", "hindi-dubbed");
+        audioValues.clear();
+        audioValues.addAll(Arrays.asList("", "dual", "multi", "hindi-dubbed"));
         setSpinnerItems(spinAudio, Arrays.asList("All Audio", "Dual Audio", "Multi Audio", "Hindi Dubbed"));
 
-        final List<String> serverVals = Arrays.asList("", "dhakaflix", "icc", "circleftp", "discoveryftp");
+        serverValues.clear();
+        serverValues.addAll(Arrays.asList("", "dhakaflix", "icc", "circleftp", "discoveryftp"));
         setSpinnerItems(spinServer, Arrays.asList("All Servers", "DhakaFlix", "ICC FTP", "CircleFTP", "DiscoveryFTP"));
 
         AdapterView.OnItemSelectedListener listener = new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 if (suppressSpinnerEvents) return;
-                if (parent == spinYear && pos < yearValues.size()) currentFilter.year = yearValues.get(pos);
-                else if (parent == spinQuality && pos < qualityVals.size()) currentFilter.quality = qualityVals.get(pos);
-                else if (parent == spinAudio && pos < audioVals.size()) currentFilter.audio = audioVals.get(pos);
-                else if (parent == spinLanguage && pos < langValues.size()) currentFilter.language = langValues.get(pos);
-                else if (parent == spinServer && pos < serverVals.size()) currentFilter.source = serverVals.get(pos);
-                else if (parent == spinSort && pos < sortValues.size()) currentFilter.sort = sortValues.get(pos);
+                boolean changed = false;
+                if (parent == spinYear && pos >= 0 && pos < yearValues.size()) {
+                    String next = yearValues.get(pos);
+                    if (!next.equals(currentFilter.year)) { currentFilter.year = next; changed = true; }
+                } else if (parent == spinQuality && pos >= 0 && pos < qualityValues.size()) {
+                    String next = qualityValues.get(pos);
+                    if (!next.equals(currentFilter.quality)) { currentFilter.quality = next; changed = true; }
+                } else if (parent == spinAudio && pos >= 0 && pos < audioValues.size()) {
+                    String next = audioValues.get(pos);
+                    if (!next.equals(currentFilter.audio)) { currentFilter.audio = next; changed = true; }
+                } else if (parent == spinLanguage && pos >= 0 && pos < langValues.size()) {
+                    String next = langValues.get(pos);
+                    if (!next.equals(currentFilter.language)) { currentFilter.language = next; changed = true; }
+                } else if (parent == spinServer && pos >= 0 && pos < serverValues.size()) {
+                    String next = serverValues.get(pos);
+                    if (!next.equals(currentFilter.source)) { currentFilter.source = next; changed = true; }
+                } else if (parent == spinSort && pos >= 0 && pos < sortValues.size()) {
+                    String next = sortValues.get(pos);
+                    if (!next.equals(currentFilter.sort)) { currentFilter.sort = next; changed = true; }
+                }
+                if (!changed) return;
                 currentFilter.page = 1;
                 loadBrowse();
             }
@@ -871,37 +899,144 @@ public final class MainActivity extends AppCompatActivity {
 
     private void populateFilterControls() {
         suppressSpinnerEvents = true;
+        boolean isSearchMode = (currentTab == 4);
+        Models.SearchFacets facets = isSearchMode ? latestSearchFacets : null;
 
+        // 1. Section Chips (scoped to active search results when in Search mode!)
         filterCategoryChips.removeAllViews();
-        addCategoryChip("All", "", currentFilter.category.isEmpty());
-        for (ServerConfig.CategoryDef c : ServerConfig.CATEGORIES) {
-            if (currentTab == 1 && !"movies".equals(c.group)) continue;
-            if (currentTab == 2 && !"series".equals(c.group)) continue;
-            Integer count = latestStats.byCategory.get(c.id);
-            String lbl = (count != null && count > 0) ? c.shortLabel + " (" + count + ")" : c.shortLabel;
-            addCategoryChip(lbl, c.id, c.id.equals(currentFilter.category));
+        if (isSearchMode) {
+            if (facets != null) {
+                String allLbl = "All (" + facets.totalUnfiltered + (facets.capped ? "+" : "") + ")";
+                addCategoryChip(allLbl, "", currentFilter.category.isEmpty());
+                List<ServerConfig.CategoryDef> matchedCats = new ArrayList<>();
+                for (ServerConfig.CategoryDef c : ServerConfig.CATEGORIES) {
+                    int cnt = facets.byCategory.containsKey(c.id) ? facets.byCategory.get(c.id) : 0;
+                    if (cnt > 0 || c.id.equals(currentFilter.category)) matchedCats.add(c);
+                }
+                matchedCats.sort((a, b) -> {
+                    int ca = facets.byCategory.containsKey(a.id) ? facets.byCategory.get(a.id) : 0;
+                    int cb = facets.byCategory.containsKey(b.id) ? facets.byCategory.get(b.id) : 0;
+                    return Integer.compare(cb, ca);
+                });
+                for (ServerConfig.CategoryDef c : matchedCats) {
+                    int cnt = facets.byCategory.containsKey(c.id) ? facets.byCategory.get(c.id) : 0;
+                    addCategoryChip(c.shortLabel + " (" + cnt + ")", c.id, c.id.equals(currentFilter.category));
+                }
+            } else {
+                addCategoryChip("All", "", currentFilter.category.isEmpty());
+            }
+        } else {
+            addCategoryChip("All", "", currentFilter.category.isEmpty());
+            for (ServerConfig.CategoryDef c : ServerConfig.CATEGORIES) {
+                if (currentTab == 1 && !"movies".equals(c.group)) continue;
+                if (currentTab == 2 && !"series".equals(c.group)) continue;
+                Integer count = latestStats.byCategory.get(c.id);
+                String lbl = (count != null && count > 0) ? c.shortLabel + " (" + count + ")" : c.shortLabel;
+                addCategoryChip(lbl, c.id, c.id.equals(currentFilter.category));
+            }
         }
 
+        // 2. Year Spinner
         yearValues.clear();
         List<String> yearLabels = new ArrayList<>();
         yearValues.add(""); yearLabels.add("All Years");
-        for (int y : latestStats.years) {
-            yearValues.add(String.valueOf(y));
-            yearLabels.add(String.valueOf(y));
+        if (facets != null) {
+            for (int y : facets.years) {
+                String ys = String.valueOf(y);
+                int yc = facets.yearCounts.containsKey(y) ? facets.yearCounts.get(y) : 0;
+                yearValues.add(ys);
+                yearLabels.add(ys + " (" + yc + ")");
+            }
+            if (!currentFilter.year.isEmpty() && !yearValues.contains(currentFilter.year)) {
+                yearValues.add(1, currentFilter.year);
+                yearLabels.add(1, currentFilter.year + " (0)");
+            }
+        } else {
+            for (int y : latestStats.years) {
+                yearValues.add(String.valueOf(y));
+                yearLabels.add(String.valueOf(y));
+            }
         }
         setSpinnerItems(spinYear, yearLabels);
-        spinYear.setSelection(Math.max(0, yearValues.indexOf(currentFilter.year)));
+        spinYear.setSelection(Math.max(0, yearValues.indexOf(currentFilter.year)), false);
 
+        // 3. Quality Spinner
+        qualityValues.clear();
+        List<String> qualityLabels = new ArrayList<>();
+        qualityValues.add(""); qualityLabels.add("All Quality");
+        String[][] qOpts = {{"4K", "4K Ultra HD"}, {"1080p", "1080p Full HD"}, {"720p", "720p HD"}, {"3D", "3D Movies"}};
+        for (String[] opt : qOpts) {
+            if (facets != null) {
+                int qCnt = facets.qualities.containsKey(opt[0]) ? facets.qualities.get(opt[0]) : 0;
+                if (qCnt > 0 || opt[0].equals(currentFilter.quality)) {
+                    qualityValues.add(opt[0]);
+                    qualityLabels.add(opt[1] + " (" + qCnt + ")");
+                }
+            } else {
+                qualityValues.add(opt[0]);
+                qualityLabels.add(opt[1]);
+            }
+        }
+        setSpinnerItems(spinQuality, qualityLabels);
+        spinQuality.setSelection(Math.max(0, qualityValues.indexOf(currentFilter.quality)), false);
+
+        // 4. Audio Spinner
+        audioValues.clear();
+        List<String> audioLabels = new ArrayList<>();
+        audioValues.add(""); audioLabels.add("All Audio");
+        String[][] aOpts = {{"dual", "Dual Audio"}, {"multi", "Multi Audio"}, {"hindi-dubbed", "Hindi Dubbed"}};
+        for (String[] opt : aOpts) {
+            if (facets != null) {
+                int aCnt = facets.audios.containsKey(opt[0]) ? facets.audios.get(opt[0]) : 0;
+                if (aCnt > 0 || opt[0].equals(currentFilter.audio)) {
+                    audioValues.add(opt[0]);
+                    audioLabels.add(opt[1] + " (" + aCnt + ")");
+                }
+            } else {
+                audioValues.add(opt[0]);
+                audioLabels.add(opt[1]);
+            }
+        }
+        setSpinnerItems(spinAudio, audioLabels);
+        spinAudio.setSelection(Math.max(0, audioValues.indexOf(currentFilter.audio)), false);
+
+        // 5. Language Spinner
         langValues.clear();
         List<String> langLabels = new ArrayList<>();
         langValues.add(""); langLabels.add("All Languages");
-        for (Models.LanguageCount lc : latestStats.languages) {
+        List<Models.LanguageCount> langSrc = facets != null ? facets.languages : latestStats.languages;
+        for (Models.LanguageCount lc : langSrc) {
             langValues.add(lc.lang);
             langLabels.add(lc.lang + " (" + lc.count + ")");
         }
+        if (!currentFilter.language.isEmpty() && !langValues.contains(currentFilter.language)) {
+            langValues.add(1, currentFilter.language);
+            langLabels.add(1, currentFilter.language + " (0)");
+        }
         setSpinnerItems(spinLanguage, langLabels);
-        spinLanguage.setSelection(Math.max(0, langValues.indexOf(currentFilter.language)));
+        spinLanguage.setSelection(Math.max(0, langValues.indexOf(currentFilter.language)), false);
 
+        // 6. Server Spinner
+        serverValues.clear();
+        List<String> serverLabels = new ArrayList<>();
+        serverValues.add(""); serverLabels.add("All Servers");
+        String[][] sOpts = {{"dhakaflix", "DhakaFlix"}, {"icc", "ICC FTP"}, {"circleftp", "CircleFTP"}, {"discoveryftp", "DiscoveryFTP"}};
+        for (String[] opt : sOpts) {
+            if (facets != null) {
+                int sCnt = facets.sources.containsKey(opt[0]) ? facets.sources.get(opt[0]) : 0;
+                if (sCnt > 0 || opt[0].equals(currentFilter.source)) {
+                    serverValues.add(opt[0]);
+                    serverLabels.add(opt[1] + " (" + sCnt + ")");
+                }
+            } else {
+                serverValues.add(opt[0]);
+                serverLabels.add(opt[1]);
+            }
+        }
+        setSpinnerItems(spinServer, serverLabels);
+        spinServer.setSelection(Math.max(0, serverValues.indexOf(currentFilter.source)), false);
+
+        // 7. Sort Spinner
         sortValues.clear();
         List<String> sortLabels = new ArrayList<>();
         if (currentTab == 4) { sortValues.add("relevance"); sortLabels.add("Best Match"); }
@@ -912,17 +1047,13 @@ public final class MainActivity extends AppCompatActivity {
         sortValues.add("imdb"); sortLabels.add("IMDb Rank");
         sortValues.add("oldest"); sortLabels.add("Oldest First");
         setSpinnerItems(spinSort, sortLabels);
-        spinSort.setSelection(Math.max(0, sortValues.indexOf(currentFilter.sort)));
-
-        spinQuality.setSelection(Math.max(0, Arrays.asList("", "4K", "1080p", "720p", "3D").indexOf(currentFilter.quality)));
-        spinAudio.setSelection(Math.max(0, Arrays.asList("", "dual", "multi", "hindi-dubbed").indexOf(currentFilter.audio)));
-        spinServer.setSelection(Math.max(0, Arrays.asList("", "dhakaflix", "icc", "circleftp", "discoveryftp").indexOf(currentFilter.source)));
+        spinSort.setSelection(Math.max(0, sortValues.indexOf(currentFilter.sort)), false);
 
         int cnt = currentFilter.activeFilterCount();
         filterHeaderText.setText(cnt > 0 ? "Filters (" + cnt + " active)" : "Filters");
         btnResetFilters.setVisibility(cnt > 0 ? View.VISIBLE : View.GONE);
 
-        suppressSpinnerEvents = false;
+        uiHandler.post(() -> suppressSpinnerEvents = false);
     }
 
     private void addCategoryChip(String label, String catId, boolean selected) {
@@ -934,7 +1065,7 @@ public final class MainActivity extends AppCompatActivity {
         chip.setOnClickListener(v -> {
             currentFilter.category = catId;
             if ("imdb-top-250".equals(catId)) currentFilter.sort = "imdb";
-            else if ("imdb".equals(currentFilter.sort)) currentFilter.sort = "recent";
+            else if ("imdb".equals(currentFilter.sort)) currentFilter.sort = (currentTab == 4 ? "relevance" : "recent");
             currentFilter.page = 1;
             populateFilterControls();
             loadBrowse();
@@ -955,6 +1086,7 @@ public final class MainActivity extends AppCompatActivity {
             }
         }
         lastHomeBackPressMs = 0L;
+        if (tabIndex != 4) latestSearchFacets = null;
         currentTab = tabIndex;
         updateTopNavStyles();
         if (tabIndex == 0) {
@@ -968,6 +1100,7 @@ public final class MainActivity extends AppCompatActivity {
             currentFilter.category = category == null ? "" : category;
             currentFilter.year = year == null ? "" : year;
             currentFilter.sort = sort == null || sort.isEmpty() ? "recent" : sort;
+            currentFilter.limit = 36;
             showActiveTabView();
             populateFilterControls();
             loadBrowse();
@@ -1083,8 +1216,10 @@ public final class MainActivity extends AppCompatActivity {
 
     private void loadBrowse() {
         Models.BrowseFilter snap = currentFilter.copy();
-        if (currentTab == 1) browseTitle.setText("Movies Library");
-        else if (currentTab == 2) browseTitle.setText("TV Series, Anime & Shows");
+        final int targetTab = currentTab;
+        final int seq = browseRequestSeq.incrementAndGet();
+        if (targetTab == 1) browseTitle.setText("Movies Library");
+        else if (targetTab == 2) browseTitle.setText("TV Series, Anime & Shows");
         else browseTitle.setText("Search: \"" + snap.query + "\"");
 
         int cnt = snap.activeFilterCount();
@@ -1094,9 +1229,13 @@ public final class MainActivity extends AppCompatActivity {
         app.ioExecutor.execute(() -> {
             Models.BrowsePageResult res = app.repository.db.queryItems(snap);
             uiHandler.post(() -> {
+                if (seq != browseRequestSeq.get() || isFinishing() || isDestroyed()) return;
                 browseCount.setText(res.total + " title" + (res.total == 1 ? "" : "s") + " found");
                 browseEmpty.setVisibility(res.items.isEmpty() ? View.VISIBLE : View.GONE);
                 browseAdapter.submitList(res.items);
+                if (res.page == 1 && browseRv != null) {
+                    browseRv.scrollToPosition(0);
+                }
                 if (res.totalPages > 1) {
                     browsePagination.setVisibility(View.VISIBLE);
                     pageIndicator.setText("Page " + res.page + " of " + res.totalPages);
@@ -1104,6 +1243,10 @@ public final class MainActivity extends AppCompatActivity {
                     btnNextPage.setEnabled(res.page < res.totalPages);
                 } else {
                     browsePagination.setVisibility(View.GONE);
+                }
+                if (targetTab == 4 && currentTab == 4 && res.facets != null && res.facets != latestSearchFacets) {
+                    latestSearchFacets = res.facets;
+                    populateFilterControls();
                 }
             });
         });

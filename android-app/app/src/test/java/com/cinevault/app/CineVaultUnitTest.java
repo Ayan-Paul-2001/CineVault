@@ -159,4 +159,36 @@ public class CineVaultUnitTest {
         assertEquals("video/mp4", MediaDownloadManager.inferMimeType("Episode.mp4"));
         assertEquals("application/x-subrip", MediaDownloadManager.inferMimeType("English.srt"));
     }
+
+    @Test
+    public void browseFilterAndSearchFacetsPreserveDynamicFilterState() {
+        Models.BrowseFilter f = new Models.BrowseFilter();
+        f.query = "game of thrones";
+        f.category = "tv-series";
+        f.skipCount = true;
+        f.limit = 36;
+        Models.BrowseFilter copy = f.copy();
+        assertEquals("game of thrones", copy.query);
+        assertEquals("tv-series", copy.category);
+        assertTrue(copy.skipCount);
+        assertEquals(36, copy.limit);
+        assertEquals(1, copy.activeFilterCount());
+
+        java.util.Map<String, Integer> byCat = new java.util.HashMap<>();
+        byCat.put("tv-series", 3);
+        byCat.put("documentary", 1);
+        Models.SearchFacets facets = new Models.SearchFacets(
+                6, false, byCat, java.util.Arrays.asList(2019, 2011),
+                java.util.Collections.singletonMap(2019, 2),
+                java.util.Collections.singletonMap("1080p", 3),
+                java.util.Collections.singletonMap("dual", 1),
+                java.util.Collections.emptyList(),
+                java.util.Collections.singletonMap("circleftp", 2)
+        );
+        Models.BrowsePageResult page = new Models.BrowsePageResult(java.util.Collections.emptyList(), 6, 1, 1, facets);
+        assertNotNull(page.facets);
+        assertEquals(6, page.facets.totalUnfiltered);
+        assertEquals(Integer.valueOf(3), page.facets.byCategory.get("tv-series"));
+        assertEquals(Integer.valueOf(3), page.facets.qualities.get("1080p"));
+    }
 }

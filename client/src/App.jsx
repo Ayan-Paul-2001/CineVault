@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import {
   Clapperboard,
   Home,
@@ -88,7 +88,7 @@ export default function App() {
       setHomeData(data);
       if (data.stats) setStats(data.stats);
       if (data.sync) setSync(data.sync);
-    } catch {}
+    } catch { }
   }, []);
 
   const loadCategories = useCallback(async () => {
@@ -98,7 +98,7 @@ export default function App() {
       setYears(data.years || []);
       setLanguages(data.languages || []);
       if (data.stats) setStats(data.stats);
-    } catch {}
+    } catch { }
   }, []);
 
   const loadMyList = useCallback(async () => {
@@ -106,7 +106,16 @@ export default function App() {
       const [wl, hist] = await Promise.all([apiGet("/api/watchlist"), apiGet("/api/history")]);
       setWatchlist(wl.items || []);
       setHistoryList(hist.items || []);
-    } catch {}
+    } catch { }
+  }, []);
+
+  const refreshContinueWatching = useCallback(async () => {
+    try {
+      const hist = await apiGet("/api/history");
+      const items = hist.items || [];
+      setHistoryList(items);
+      setHomeData((prev) => (prev ? { ...prev, continueWatching: items } : prev));
+    } catch { }
   }, []);
 
   // Initial load + Real-time SSE sync stream
@@ -133,7 +142,7 @@ export default function App() {
             loadCategories();
           }
         }
-      } catch {}
+      } catch { }
     };
 
     es.addEventListener("status", (e) => handlePayload(e, false));
@@ -156,10 +165,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [playerSession]);
 
-  // Fetch Browse / Search grid whenever tab or filters change
+  // Fetch Browse / Search grid whenever tab or filters change (with AbortController to cancel stale searches)
   useEffect(() => {
     if (tab !== "movies" && tab !== "series" && tab !== "search") return;
-    let cancelled = false;
+    const controller = new AbortController();
     setBrowseLoading(true);
 
     const p = new URLSearchParams();
@@ -174,19 +183,23 @@ export default function App() {
     if (filters.source) p.set("source", filters.source);
     p.set("sort", filters.sort);
     p.set("page", String(filters.page));
-    p.set("limit", "60");
+    p.set("limit", "36");
 
-    apiGet(`/api/items?${p.toString()}`)
+    apiGet(`/api/items?${p.toString()}`, { signal: controller.signal })
       .then((res) => {
-        if (!cancelled) setBrowseResult(res);
+        if (!controller.signal.aborted) setBrowseResult(res);
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (err?.name !== "AbortError") {
+          // keep current results on transient failure
+        }
+      })
       .finally(() => {
-        if (!cancelled) setBrowseLoading(false);
+        if (!controller.signal.aborted) setBrowseLoading(false);
       });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [tab, filters]);
 
@@ -195,21 +208,33 @@ export default function App() {
     if (tab === "mylist") loadMyList();
   }, [tab, loadMyList]);
 
-  // Search typing with debounce
+  // Search typing with adaptive debounce
   const handleSearchChange = (val) => {
     setSearchInput(val);
     clearTimeout(debounceRef.current);
+    const trimmed = val.trim();
+    const delay = trimmed.length === 1 ? 260 : 150;
     debounceRef.current = setTimeout(() => {
-      const q = val.trim();
       setUpstreamResults([]);
-      if (q.length > 0) {
+      if (trimmed.length > 0) {
         setTab("search");
-        setFilters((prev) => ({ ...prev, q, category: "", page: 1, sort: "relevance" }));
+        setFilters((prev) => ({
+          ...prev,
+          q: trimmed,
+          category: "",
+          year: "",
+          quality: "",
+          audio: "",
+          language: "",
+          source: "",
+          page: 1,
+          sort: "relevance",
+        }));
       } else if (tab === "search") {
         setTab("home");
         setFilters((prev) => ({ ...prev, q: "", page: 1, sort: "recent" }));
       }
-    }, 220);
+    }, delay);
   };
 
   const runLiveUpstreamSearch = async () => {
@@ -225,7 +250,7 @@ export default function App() {
     }
   };
 
-  const navigateTab = (nextTab, extraFilters = {}) => {
+  const navigateTab = useCallback((nextTab, extraFilters = {}) => {
     setTab(nextTab);
     if (nextTab !== "search") {
       setSearchInput("");
@@ -243,30 +268,52 @@ export default function App() {
       page: 1,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
-  };
+  }, []);
 
-  const handleToggleWatchlist = async (mediaId) => {
-    try {
-      const res = await apiPost(`/api/watchlist/${mediaId}`);
-      notify(res.inWatchlist ? "Added to My List" : "Removed from My List");
-      loadHome();
-      if (tab === "mylist") loadMyList();
-      return res;
-    } catch {
-      return null;
-    }
-  };
+  const handleExploreSection = useCallback(
+    (sec) => {
+      if (!sec) return;
+      navigateTab(
+        sec.id === "tv-series" ||
+          sec.id === "korean-series" ||
+          sec.id === "anime" ||
+          sec.id === "documentary"
+          ? "series"
+          : "movies",
+        sec.filter
+      );
+    },
+    [navigateTab]
+  );
 
-  const handleRemoveWatchlistItem = async (item) => {
-    try {
-      await apiDelete(`/api/watchlist/${item.id}`);
-      setWatchlist((prev) => prev.filter((w) => w.id !== item.id));
-      notify(`Removed "${item.title}" from Watchlist`);
-      loadHome();
-    } catch {
-      notify("Failed to remove from Watchlist");
-    }
-  };
+  const handleToggleWatchlist = useCallback(
+    async (mediaId) => {
+      try {
+        const res = await apiPost(`/api/watchlist/${mediaId}`);
+        notify(res.inWatchlist ? "Added to My List" : "Removed from My List");
+        loadHome();
+        if (tab === "mylist") loadMyList();
+        return res;
+      } catch {
+        return null;
+      }
+    },
+    [notify, loadHome, loadMyList, tab]
+  );
+
+  const handleRemoveWatchlistItem = useCallback(
+    async (item) => {
+      try {
+        await apiDelete(`/api/watchlist/${item.id}`);
+        setWatchlist((prev) => prev.filter((w) => w.id !== item.id));
+        notify(`Removed "${item.title}" from Watchlist`);
+        loadHome();
+      } catch {
+        notify("Failed to remove from Watchlist");
+      }
+    },
+    [notify, loadHome]
+  );
 
   const handleClearWatchlist = async () => {
     if (confirmClear !== "watchlist") {
@@ -285,20 +332,23 @@ export default function App() {
     }
   };
 
-  const handleRemoveHistoryItem = async (item) => {
-    try {
-      await apiDelete(`/api/history?mediaId=${item.id}`);
-      setHistoryList((prev) => prev.filter((h) => h.id !== item.id));
-      setHomeData((prev) =>
-        prev
-          ? { ...prev, continueWatching: (prev.continueWatching || []).filter((h) => h.id !== item.id) }
-          : prev
-      );
-      notify(`Removed "${item.title}" from Watch History`);
-    } catch {
-      notify("Failed to remove from History");
-    }
-  };
+  const handleRemoveHistoryItem = useCallback(
+    async (item) => {
+      try {
+        await apiDelete(`/api/history?mediaId=${item.id}`);
+        setHistoryList((prev) => prev.filter((h) => h.id !== item.id));
+        setHomeData((prev) =>
+          prev
+            ? { ...prev, continueWatching: (prev.continueWatching || []).filter((h) => h.id !== item.id) }
+            : prev
+        );
+        notify(`Removed "${item.title}" from Watch History`);
+      } catch {
+        notify("Failed to remove from History");
+      }
+    },
+    [notify]
+  );
 
   const handleClearHistory = async () => {
     if (confirmClear !== "history") {
@@ -477,7 +527,7 @@ export default function App() {
       } catch (err) {
         downloadAbortMapRef.current.delete(id);
         if (fileWritable) {
-          try { await fileWritable.abort(); } catch {}
+          try { await fileWritable.abort(); } catch { }
         }
         if (err?.name === "AbortError") {
           updateDownloadItem(id, { status: "canceled", speedBps: 0 });
@@ -497,10 +547,10 @@ export default function App() {
   const activeDownloadAvgPct =
     activeDownloadCount > 0
       ? Math.round(
-          downloads
-            .filter((d) => d.status === "downloading")
-            .reduce((acc, d) => acc + (d.percent || 0), 0) / activeDownloadCount
-        )
+        downloads
+          .filter((d) => d.status === "downloading")
+          .reduce((acc, d) => acc + (d.percent || 0), 0) / activeDownloadCount
+      )
       : 0;
 
   const handleTriggerSync = async (mode) => {
@@ -516,7 +566,7 @@ export default function App() {
     }
   };
 
-  const handleSelectCard = (item, progress = null, autoPlay = false) => {
+  const handleSelectCard = useCallback((item, progress = null, autoPlay = false) => {
     // If clicked from Continue Watching and we know the exact file URL, resume straight into Player!
     if (progress?.file_url) {
       setPlayerSession({
@@ -532,13 +582,47 @@ export default function App() {
       return;
     }
     setActiveDetail({ id: item.id, initialPlay: autoPlay });
-  };
+  }, []);
 
-  const visibleCategories = categories.filter((c) => {
-    if (tab === "movies") return c.group === "movies";
-    if (tab === "series") return c.group === "series";
-    return true;
-  });
+  const searchFacets = tab === "search" ? browseResult.facets || null : null;
+
+  const visibleCategories = useMemo(() => {
+    if (tab === "search") {
+      if (!searchFacets) return [];
+      const counts = searchFacets.byCategory || {};
+      return categories
+        .map((c) => ({ ...c, count: counts[c.id] || 0 }))
+        .filter((c) => c.count > 0 || c.id === filters.category)
+        .sort((a, b) => b.count - a.count);
+    }
+    return categories.filter((c) => {
+      if (tab === "movies") return c.group === "movies";
+      if (tab === "series") return c.group === "series";
+      return true;
+    });
+  }, [categories, tab, searchFacets, filters.category]);
+
+  const filterYears = useMemo(() => {
+    if (tab === "search" && searchFacets) {
+      const list = [...(searchFacets.years || [])];
+      if (filters.year && !list.includes(Number(filters.year))) {
+        list.unshift(Number(filters.year));
+      }
+      return list;
+    }
+    return years;
+  }, [tab, searchFacets, years, filters.year]);
+
+  const filterLanguages = useMemo(() => {
+    if (tab === "search" && searchFacets) {
+      const list = [...(searchFacets.languages || [])];
+      if (filters.language && !list.some((l) => l.lang.toLowerCase() === filters.language.toLowerCase())) {
+        list.unshift({ lang: filters.language, count: 0 });
+      }
+      return list;
+    }
+    return languages;
+  }, [tab, searchFacets, languages, filters.language]);
 
   return (
     <>
@@ -740,17 +824,8 @@ export default function App() {
                       subtitle={sec.subtitle}
                       items={sec.items}
                       onSelect={handleSelectCard}
-                      onExploreAll={() =>
-                        navigateTab(
-                          sec.id === "tv-series" ||
-                            sec.id === "korean-series" ||
-                            sec.id === "anime" ||
-                            sec.id === "documentary"
-                            ? "series"
-                            : "movies",
-                          sec.filter
-                        )
-                      }
+                      exploreTarget={sec}
+                      onExploreAll={handleExploreSection}
                     />
                   ))}
                 </div>
@@ -793,8 +868,9 @@ export default function App() {
               <FilterPanel
                 tab={tab}
                 categories={visibleCategories}
-                years={years}
-                languages={languages}
+                years={filterYears}
+                languages={filterLanguages}
+                facets={searchFacets}
                 filters={filters}
                 onChangeFilters={(patch) => setFilters((f) => ({ ...f, ...patch }))}
                 onReset={() =>
@@ -868,20 +944,20 @@ export default function App() {
               )}
 
               {/* Results Grid */}
-              {browseLoading ? (
+              {browseLoading && browseResult.items.length === 0 ? (
                 <div className="skeleton-grid">
-                  {Array.from({ length: 24 }).map((_, i) => (
+                  {Array.from({ length: 18 }).map((_, i) => (
                     <div className="skeleton-card" key={i} />
                   ))}
                 </div>
-              ) : browseResult.items.length === 0 ? (
+              ) : !browseLoading && browseResult.items.length === 0 ? (
                 <div className="empty-state">
                   <h3 style={{ marginBottom: 8 }}>No matching titles found</h3>
                   <p>Try broadening your filters or run a Deep Live All-Server Search.</p>
                 </div>
               ) : (
                 <>
-                  <div className="media-grid">
+                  <div className={`media-grid ${browseLoading ? "is-updating" : ""}`}>
                     {browseResult.items.map((item) => (
                       <MediaCard key={item.id} item={item} onSelect={handleSelectCard} />
                     ))}
@@ -1133,9 +1209,9 @@ export default function App() {
           session={playerSession}
           onClose={() => {
             setPlayerSession(null);
-            loadHome();
+            refreshContinueWatching();
           }}
-          onProgressSaved={loadHome}
+          onProgressSaved={refreshContinueWatching}
           onRequestDownload={(req) => setPendingDownload(req)}
           onSwitchEpisode={(nextIndex) => {
             const nextFile = playerSession.playlist?.[nextIndex];

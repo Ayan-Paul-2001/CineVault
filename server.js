@@ -2,8 +2,10 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import zlib from "node:zlib";
 import { PORT, HOST, DATA_DIR, DIST_DIR, PUBLIC_DIR, CATEGORIES, SERVERS, isAllowedUrl } from "./src/config.js";
 import {
+  getCatalogVersion,
   getLibraryStats,
   queryItems,
   getItemById,
@@ -11,6 +13,7 @@ import {
   runDeduplication,
   toggleWatchlist,
   getWatchlist,
+  getWatchlistIds,
   removeFromWatchlist,
   clearWatchlist,
   upsertWatchProgress,
@@ -54,15 +57,30 @@ const STATIC_MIMES = {
   ".webp": "image/webp",
 };
 
+const STATIC_CACHE = new Map();
+
 function sendJson(res, data, status = 200) {
-  const body = JSON.stringify(data);
+  const raw = Buffer.from(JSON.stringify(data), "utf8");
+  const acceptEnc = String(res.req?.headers?.["accept-encoding"] || "");
+  if (raw.length >= 1024 && acceptEnc.includes("gzip")) {
+    const gz = zlib.gzipSync(raw, { level: 4 });
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Encoding": "gzip",
+      "Content-Length": gz.length,
+      "Cache-Control": "private, no-store",
+      Vary: "Accept-Encoding, X-CineVault-Device-Id",
+    });
+    res.end(gz);
+    return;
+  }
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
+    "Content-Length": raw.length,
     "Cache-Control": "private, no-store",
-    Vary: "X-CineVault-Device-Id",
+    Vary: "Accept-Encoding, X-CineVault-Device-Id",
   });
-  res.end(body);
+  res.end(raw);
 }
 
 async function readJsonBody(req) {
@@ -92,9 +110,11 @@ function getLanAddresses() {
 
 let cachedHome = null;
 let cachedHomeAt = 0;
+let cachedHomeVersion = -1;
 
 function invalidateHomeCache() {
   cachedHome = null;
+  cachedHomeVersion = -1;
 }
 
 function getRequestDeviceId(req) {
@@ -103,20 +123,22 @@ function getRequestDeviceId(req) {
 }
 
 function buildHomePayload(deviceId = "default") {
+  const ver = getCatalogVersion();
   let shared = cachedHome;
-  if (!shared || Date.now() - cachedHomeAt >= 4000) {
-    const recentlyAdded = queryItems({ sort: "recent", limit: 36 }).items;
-    const latestMovies = queryItems({ mediaType: "movie", sort: "recent", limit: 36 }).items;
-    const latestSeries = queryItems({ mediaType: "series", sort: "recent", limit: 36 }).items;
-    const latest2026 = queryItems({ year: 2026, mediaType: "movie", sort: "recent", limit: 36 }).items;
-    const uhd4k = queryItems({ category: "4k-movies", sort: "recent", limit: 36 }).items;
-    const hindi = queryItems({ category: "hindi", sort: "recent", limit: 36 }).items;
-    const southIndian = queryItems({ category: "south-indian,south-dubbed", sort: "recent", limit: 36 }).items;
-    const koreanSeries = queryItems({ category: "korean-series", sort: "recent", limit: 36 }).items;
-    const anime = queryItems({ category: "anime", sort: "recent", limit: 36 }).items;
-    const animation = queryItems({ category: "animation-1080p,animation", sort: "recent", limit: 36 }).items;
-    const documentary = queryItems({ category: "documentary", sort: "recent", limit: 36 }).items;
-    const imdbTop250 = queryItems({ category: "imdb-top-250", sort: "imdb", limit: 36 }).items;
+  if (!shared || cachedHomeVersion !== ver || Date.now() - cachedHomeAt >= 300000) {
+    const HOME_ROW_LIMIT = 20;
+    const recentlyAdded = queryItems({ sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const latestMovies = queryItems({ mediaType: "movie", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const latestSeries = queryItems({ mediaType: "series", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const latest2026 = queryItems({ year: 2026, mediaType: "movie", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const uhd4k = queryItems({ category: "4k-movies", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const hindi = queryItems({ category: "hindi", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const southIndian = queryItems({ category: "south-indian,south-dubbed", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const koreanSeries = queryItems({ category: "korean-series", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const anime = queryItems({ category: "anime", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const animation = queryItems({ category: "animation-1080p,animation", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const documentary = queryItems({ category: "documentary", sort: "recent", limit: HOME_ROW_LIMIT, skipCount: true }).items;
+    const imdbTop250 = queryItems({ category: "imdb-top-250", sort: "imdb", limit: HOME_ROW_LIMIT, skipCount: true }).items;
 
     const heroPool = [
       ...latest2026.filter((i) => i.quality === "4K" || i.quality === "1080p").slice(0, 3),
@@ -153,17 +175,19 @@ function buildHomePayload(deviceId = "default") {
       stats: getLibraryStats(),
     };
     cachedHome = shared;
+    cachedHomeVersion = ver;
     cachedHomeAt = Date.now();
   }
 
   // Per-device private Watchlist flags & Continue Watching history
-  const deviceWlIds = new Set(getWatchlist(deviceId).map((w) => w.id));
-  const mapWl = (item) => ({ ...item, in_watchlist: deviceWlIds.has(item.id) ? 1 : 0 });
+  const deviceWlIds = getWatchlistIds(deviceId);
+  const hasWl = deviceWlIds.size > 0;
+  const mapWl = (item) => (hasWl && deviceWlIds.has(item.id) ? { ...item, in_watchlist: 1 } : item);
 
   return {
-    hero: shared.hero.map(mapWl),
+    hero: hasWl ? shared.hero.map(mapWl) : shared.hero,
     continueWatching: getContinueWatching(24, deviceId),
-    sections: shared.sections.map((s) => ({ ...s, items: s.items.map(mapWl) })),
+    sections: hasWl ? shared.sections.map((s) => ({ ...s, items: s.items.map(mapWl) })) : shared.sections,
     stats: shared.stats,
     sync: getSyncStatus(),
   };
@@ -273,7 +297,7 @@ const server = http.createServer(async (req, res) => {
         const files = safeJson(item.files_json, []);
         const seasons = safeJson(item.seasons_json, []);
         const history = getItemWatchHistory(id, deviceId);
-        const wl = getWatchlist(deviceId).some((w) => w.id === (item.canonical_id || id));
+        const wl = getWatchlistIds(deviceId).has(item.canonical_id || id);
 
         // If primary edition lacked ICC plot/director/trailer but one of the merged ICC editions has it, pull it in!
         let mergedMeta = { ...(enrichedMeta || {}) };
@@ -530,9 +554,9 @@ const server = http.createServer(async (req, res) => {
         const sendEvent = (type, payload) => {
           res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
         };
-        sendEvent("status", { sync: getSyncStatus(), stats: getLibraryStats() });
+        sendEvent("status", { sync: getSyncStatus(), stats: getLibraryStats(false, 10000) });
 
-        const onProgress = (st) => sendEvent("progress", { sync: st, stats: getLibraryStats() });
+        const onProgress = (st) => sendEvent("progress", { sync: st, stats: getLibraryStats(false, 10000) });
         const onDone = (st) => {
           invalidateHomeCache();
           sendEvent("done", { sync: st, stats: getLibraryStats(true) });
@@ -571,14 +595,30 @@ const server = http.createServer(async (req, res) => {
     }
 
     const ext = path.extname(filePath).toLowerCase();
-    const content = fs.readFileSync(filePath);
     const isHashedAsset = safeRel.includes("assets");
-    res.writeHead(200, {
+    let cachedStatic = STATIC_CACHE.get(filePath);
+    if (!cachedStatic || !isHashedAsset) {
+      const stat = fs.statSync(filePath);
+      if (!cachedStatic || cachedStatic.mtimeMs !== stat.mtimeMs) {
+        const raw = fs.readFileSync(filePath);
+        const compressible = ext === ".html" || ext === ".js" || ext === ".css" || ext === ".svg" || ext === ".json";
+        const gz = compressible && raw.length >= 1024 ? zlib.gzipSync(raw, { level: 6 }) : null;
+        cachedStatic = { mtimeMs: stat.mtimeMs, raw, gz };
+        STATIC_CACHE.set(filePath, cachedStatic);
+      }
+    }
+    const acceptEnc = String(req.headers["accept-encoding"] || "");
+    const useGzip = Boolean(cachedStatic.gz && acceptEnc.includes("gzip"));
+    const body = useGzip ? cachedStatic.gz : cachedStatic.raw;
+    const headers = {
       "Content-Type": STATIC_MIMES[ext] || "application/octet-stream",
-      "Content-Length": content.length,
+      "Content-Length": body.length,
       "Cache-Control": isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache",
-    });
-    res.end(content);
+      Vary: "Accept-Encoding",
+    };
+    if (useGzip) headers["Content-Encoding"] = "gzip";
+    res.writeHead(200, headers);
+    res.end(body);
   } catch (err) {
     console.error("[server] Error:", err);
     if (!res.headersSent) {
@@ -608,6 +648,8 @@ process.on("SIGTERM", () => {
 process.on("exit", cleanupPid);
 
 const tools = await detectMediaTools();
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 server.listen(PORT, HOST, () => {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });

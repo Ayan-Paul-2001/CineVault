@@ -1,8 +1,8 @@
-import React from "react";
+import React, { memo } from "react";
 import { Play, Tv, Film, X } from "lucide-react";
 import { CATEGORY_LABELS, formatDuration } from "../api.js";
 
-export default function MediaCard({ item, onSelect, onRemove = null, removeTitle = "Remove", progress = null }) {
+const MediaCard = memo(function MediaCard({ item, onSelect, onRemove = null, removeTitle = "Remove", progress = null }) {
   const pct =
     progress && progress.duration > 0
       ? Math.min(100, Math.max(3, Math.round((progress.position / progress.duration) * 100)))
@@ -28,6 +28,7 @@ export default function MediaCard({ item, onSelect, onRemove = null, removeTitle
           alt={item.title}
           loading="lazy"
           decoding="async"
+          fetchPriority="low"
         />
 
         {onRemove && (
@@ -101,4 +102,6 @@ export default function MediaCard({ item, onSelect, onRemove = null, removeTitle
       </div>
     </div>
   );
-}
+});
+
+export default MediaCard;

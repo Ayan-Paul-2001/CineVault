@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, memo } from "react";
 import { Play, Info, Sparkles, Plus, Check } from "lucide-react";
 import { CATEGORY_LABELS } from "../api.js";
 
-export default function HeroSpotlight({ items, onSelect, onToggleWatchlist }) {
+const HeroSpotlight = memo(function HeroSpotlight({ items, onSelect, onToggleWatchlist }) {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
@@ -84,4 +84,6 @@ export default function HeroSpotlight({ items, onSelect, onToggleWatchlist }) {
       )}
     </section>
   );
-}
+});
+
+export default HeroSpotlight;

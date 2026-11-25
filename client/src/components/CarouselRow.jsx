@@ -1,8 +1,8 @@
-import React, { useRef } from "react";
+import React, { useRef, memo } from "react";
 import { ChevronLeft, ChevronRight, ArrowRight } from "lucide-react";
 import MediaCard from "./MediaCard.jsx";
 
-export default function CarouselRow({
+const CarouselRow = memo(function CarouselRow({
   title,
   subtitle,
   items,
@@ -11,6 +11,7 @@ export default function CarouselRow({
   removeTitle = "Remove",
   headerAction = null,
   onExploreAll,
+  exploreTarget = null,
   isContinueWatching = false,
 }) {
   const trackRef = useRef(null);
@@ -33,7 +34,7 @@ export default function CarouselRow({
         <div className="section-controls">
           {headerAction}
           {onExploreAll && (
-            <button className="see-all-btn" onClick={onExploreAll}>
+            <button className="see-all-btn" onClick={() => onExploreAll(exploreTarget)}>
               See all <ArrowRight size={14} />
             </button>
           )}
@@ -60,4 +61,6 @@ export default function CarouselRow({
       </div>
     </section>
   );
-}
+});
+
+export default CarouselRow;

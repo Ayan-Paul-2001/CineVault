@@ -12,6 +12,9 @@ db.exec(`
   PRAGMA synchronous = NORMAL;
   PRAGMA busy_timeout = 5000;
   PRAGMA temp_store = MEMORY;
+  PRAGMA cache_size = -64000;
+  PRAGMA mmap_size = 268435456;
+  PRAGMA wal_autocheckpoint = 2000;
   PRAGMA foreign_keys = ON;
 
   CREATE TABLE IF NOT EXISTS media_items (
@@ -146,6 +149,20 @@ for (const [col, def] of migrations) {
 }
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS media_categories (
+    category TEXT NOT NULL,
+    media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+    modified_at INTEGER NOT NULL DEFAULT 0,
+    year INTEGER NOT NULL DEFAULT 0,
+    quality_score INTEGER NOT NULL DEFAULT 0,
+    imdb_rank INTEGER,
+    PRIMARY KEY (category, media_id)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_mc_cat_recent ON media_categories(category, modified_at DESC, year DESC, quality_score DESC, media_id DESC);
+  CREATE INDEX IF NOT EXISTS idx_mc_cat_imdb ON media_categories(category, imdb_rank ASC, quality_score DESC, media_id DESC);
+  CREATE INDEX IF NOT EXISTS idx_mc_media_id ON media_categories(media_id);
+
   CREATE INDEX IF NOT EXISTS idx_media_category ON media_items(category);
   CREATE INDEX IF NOT EXISTS idx_media_type ON media_items(media_type);
   CREATE INDEX IF NOT EXISTS idx_media_year ON media_items(year DESC);
@@ -156,6 +173,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_media_primary ON media_items(is_primary);
   CREATE INDEX IF NOT EXISTS idx_media_canonical ON media_items(canonical_id);
   CREATE INDEX IF NOT EXISTS idx_media_source ON media_items(source);
+
+  CREATE INDEX IF NOT EXISTS idx_primary_recent ON media_items(modified_at DESC, year DESC, quality_score DESC, id DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_type_recent ON media_items(media_type, modified_at DESC, year DESC, quality_score DESC, id DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_type_year_recent ON media_items(media_type, year DESC, modified_at DESC, quality_score DESC, id DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_year_recent ON media_items(year DESC, modified_at DESC, quality_score DESC, id DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_quality_recent ON media_items(quality, modified_at DESC, quality_score DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_source_recent ON media_items(source, modified_at DESC, quality_score DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_score_recent ON media_items(quality_score DESC, modified_at DESC, year DESC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_title ON media_items(title COLLATE NOCASE ASC) WHERE is_primary = 1;
+  CREATE INDEX IF NOT EXISTS idx_primary_imdb ON media_items(imdb_rank ASC, quality_score DESC) WHERE is_primary = 1 AND imdb_rank IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_primary_lang ON media_items(language_tag COLLATE NOCASE, modified_at DESC) WHERE is_primary = 1 AND language_tag IS NOT NULL;
 `);
 
 // Backfill quality_score & clean_title on existing rows if upgrading from v1
@@ -262,10 +290,103 @@ const stmtUpsert = db.prepare(`
 
 let cachedStats = null;
 let statsBuiltAt = 0;
+let catalogVersion = 1;
+const searchFacetCache = new Map(); // cacheKey -> { ver, facets }
+
+export function getCatalogVersion() {
+  return catalogVersion;
+}
 
 export function invalidateStatsCache() {
   cachedStats = null;
+  searchFacetCache.clear();
+  catalogVersion++;
 }
+
+const stmtUpsertMediaCat = db.prepare(`
+  INSERT OR REPLACE INTO media_categories(category, media_id, modified_at, year, quality_score, imdb_rank)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+const stmtSyncPrimaryCatByUrl = db.prepare(`
+  INSERT OR REPLACE INTO media_categories(category, media_id, modified_at, year, quality_score, imdb_rank)
+  SELECT category, id, COALESCE(modified_at, 0), COALESCE(year, 0), COALESCE(quality_score, 0), imdb_rank
+  FROM media_items
+  WHERE url = ? AND is_primary = 1
+`);
+
+/**
+ * Rebuild covering media_categories table from primary media_items rows.
+ * Enables <1ms category browse & Home section queries with zero LIKE full-table scans.
+ */
+export function rebuildMediaCategories() {
+  const t0 = Date.now();
+  const rows = db.prepare(`
+    SELECT id, category, categories_all, modified_at, year, quality_score, imdb_rank
+    FROM media_items
+    WHERE is_primary = 1
+  `).all();
+
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM media_categories");
+    for (const r of rows) {
+      const mod = r.modified_at || 0;
+      const yr = r.year || 0;
+      const qs = r.quality_score || 0;
+      const rank = r.imdb_rank ?? null;
+      if (r.categories_all) {
+        const parts = r.categories_all.split(",");
+        let inserted = false;
+        for (let i = 1; i < parts.length - 1; i++) {
+          const c = parts[i];
+          if (c) {
+            stmtUpsertMediaCat.run(c, r.id, mod, yr, qs, rank);
+            inserted = true;
+          }
+        }
+        if (!inserted && r.category) {
+          stmtUpsertMediaCat.run(r.category, r.id, mod, yr, qs, rank);
+        }
+      } else if (r.category) {
+        stmtUpsertMediaCat.run(r.category, r.id, mod, yr, qs, rank);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  return { rows: rows.length, elapsedMs: Date.now() - t0 };
+}
+
+// One-time startup optimization: populate media_categories, optimize FTS5, checkpoint WAL & ANALYZE
+(() => {
+  try {
+    const primaryCount = db.prepare("SELECT COUNT(*) AS c FROM media_items WHERE is_primary = 1").get().c;
+    const catCount = db.prepare("SELECT COUNT(*) AS c FROM media_categories").get().c;
+    const perfFlag = db.prepare("SELECT value FROM sync_state WHERE key = 'perf_v2_migrated'").get()?.value;
+
+    if (primaryCount > 0 && (catCount === 0 || perfFlag !== "1")) {
+      const mc = rebuildMediaCategories();
+      if (hasFts5) {
+        try {
+          db.exec("INSERT INTO media_fts(media_fts) VALUES('optimize')");
+        } catch {}
+      }
+      try {
+        db.exec("ANALYZE;");
+      } catch {}
+      try {
+        db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+      } catch {}
+      db.prepare("INSERT INTO sync_state(key, value) VALUES ('perf_v2_migrated', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+      console.log(`[db] Speed indexes & media_categories built (${mc.rows} titles in ${mc.elapsedMs}ms)`);
+    }
+  } catch (err) {
+    console.warn("[db] Perf index bootstrap warning:", err.message);
+  }
+})();
 
 /**
  * Load all existing URLs + modified_at + quality_score once at sync start
@@ -327,6 +448,7 @@ export function upsertMediaBatch(items, existingUrlMap = null) {
         ...item,
         discovered_at: now,
       });
+      stmtSyncPrimaryCatByUrl.run(item.url);
       written++;
     }
     db.exec("COMMIT");
@@ -468,6 +590,16 @@ export function runDeduplication() {
     throw err;
   }
 
+  rebuildMediaCategories();
+  if (hasFts5 && writes > 250) {
+    try {
+      db.exec("INSERT INTO media_fts(media_fts) VALUES('optimize')");
+    } catch {}
+  }
+  try {
+    db.exec("PRAGMA wal_checkpoint(PASSIVE);");
+  } catch {}
+
   const elapsedMs = Date.now() - t0;
   invalidateStatsCache();
   setSyncState("last_dedup_stats", JSON.stringify({ totalRaw: rows.length, unique: primaryCount, duplicatesHidden: duplicateCount, writes, elapsedMs }));
@@ -582,48 +714,42 @@ export function getMergedMirrors(item) {
   `).all(canonId, item.id);
 }
 
-export function getLibraryStats(force = false) {
-  if (!force && cachedStats && Date.now() - statsBuiltAt < 15000) {
+export function getLibraryStats(force = false, maxAgeMs = 300000) {
+  if (!force && cachedStats && Date.now() - statsBuiltAt < maxAgeMs) {
     return cachedStats;
   }
 
   const totalRaw = db.prepare("SELECT COUNT(*) as c FROM media_items").get().c;
-  const rows = db
-    .prepare("SELECT category, categories_all, media_type, source, year, language_tag FROM media_items WHERE is_primary = 1")
-    .all();
 
   let movies = 0;
   let series = 0;
+  for (const r of db.prepare("SELECT media_type, COUNT(*) AS c FROM media_items WHERE is_primary = 1 GROUP BY media_type").all()) {
+    if (r.media_type === "series") series += r.c;
+    else movies += r.c;
+  }
+  const total = movies + series;
+
   const bySource = {};
-  const byCategory = {};
-  for (const catId of CATEGORY_MAP.keys()) byCategory[catId] = 0;
-  const yearSet = new Set();
-  const langCounts = {};
-
-  for (const r of rows) {
-    if (r.media_type === "series") series++;
-    else movies++;
-
-    bySource[r.source] = (bySource[r.source] || 0) + 1;
-    if (r.year && r.year >= 1920 && r.year <= 2030) yearSet.add(r.year);
-    if (r.language_tag) langCounts[r.language_tag] = (langCounts[r.language_tag] || 0) + 1;
-
-    if (r.categories_all) {
-      const parts = r.categories_all.split(",");
-      for (let i = 1; i < parts.length - 1; i++) {
-        const c = parts[i];
-        if (c in byCategory) byCategory[c]++;
-      }
-    } else if (r.category in byCategory) {
-      byCategory[r.category]++;
-    }
+  for (const r of db.prepare("SELECT source, COUNT(*) AS c FROM media_items WHERE is_primary = 1 GROUP BY source").all()) {
+    if (r.source) bySource[r.source] = r.c;
   }
 
-  const total = rows.length;
-  const languages = Object.entries(langCounts)
-    .filter(([, cnt]) => cnt >= 15)
-    .sort((a, b) => b[1] - a[1])
-    .map(([lang, count]) => ({ lang, count }));
+  const byCategory = {};
+  for (const catId of CATEGORY_MAP.keys()) byCategory[catId] = 0;
+  for (const r of db.prepare("SELECT category, COUNT(*) AS c FROM media_categories GROUP BY category").all()) {
+    if (r.category in byCategory) byCategory[r.category] = r.c;
+  }
+
+  const years = db
+    .prepare("SELECT DISTINCT year FROM media_items WHERE is_primary = 1 AND year >= 1920 AND year <= 2030 ORDER BY year DESC")
+    .all()
+    .map((r) => r.year);
+
+  const languages = db
+    .prepare(
+      "SELECT language_tag AS lang, COUNT(*) AS count FROM media_items WHERE is_primary = 1 AND language_tag IS NOT NULL AND language_tag != '' GROUP BY language_tag HAVING count >= 15 ORDER BY count DESC"
+    )
+    .all();
 
   cachedStats = {
     total,
@@ -633,7 +759,7 @@ export function getLibraryStats(force = false) {
     series,
     bySource,
     byCategory,
-    years: [...yearSet].sort((a, b) => b - a),
+    years,
     languages,
     lastSync: getSyncState("last_sync_at"),
   };
@@ -641,9 +767,103 @@ export function getLibraryStats(force = false) {
   return cachedStats;
 }
 
+export function getWatchlistIds(deviceId = "default") {
+  const safeDevice = normalizeDeviceId(deviceId);
+  const rows = db.prepare("SELECT media_id FROM watchlist WHERE device_id = ?").all(safeDevice);
+  const set = new Set();
+  for (const r of rows) set.add(r.media_id);
+  return set;
+}
+
 export function normalizeDeviceId(raw) {
   const s = String(raw || "").trim();
   return /^[a-zA-Z0-9_-]{8,64}$/.test(s) ? s : "default";
+}
+
+function computeSearchFacets(trimmedQ, singleCharPrefix, usedFts, searchFromSql, searchWhere, searchParams) {
+  const cacheKey = trimmedQ.toLowerCase();
+  const cached = searchFacetCache.get(cacheKey);
+  if (cached && cached.ver === catalogVersion) {
+    return cached.facets;
+  }
+
+  const whereSql = `WHERE ${searchWhere.join(" AND ")}`;
+  const rows = db.prepare(`
+    SELECT m.category, m.categories_all, m.year, m.quality, m.audio_tags, m.language_tag, m.source
+    ${searchFromSql}
+    ${whereSql}
+    LIMIT 6000
+  `).all(...searchParams);
+
+  const byCategory = {};
+  const yearCounts = {};
+  const qualities = {};
+  const audios = { dual: 0, multi: 0, "hindi-dubbed": 0 };
+  const langCounts = {};
+  const sources = {};
+
+  for (const r of rows) {
+    if (r.categories_all) {
+      const parts = r.categories_all.split(",");
+      let added = false;
+      for (let i = 1; i < parts.length - 1; i++) {
+        const c = parts[i];
+        if (c) {
+          byCategory[c] = (byCategory[c] || 0) + 1;
+          added = true;
+        }
+      }
+      if (!added && r.category) {
+        byCategory[r.category] = (byCategory[r.category] || 0) + 1;
+      }
+    } else if (r.category) {
+      byCategory[r.category] = (byCategory[r.category] || 0) + 1;
+    }
+
+    if (r.year && r.year >= 1920 && r.year <= 2030) {
+      yearCounts[r.year] = (yearCounts[r.year] || 0) + 1;
+    }
+    if (r.quality) {
+      qualities[r.quality] = (qualities[r.quality] || 0) + 1;
+    }
+    if (r.audio_tags) {
+      if (r.audio_tags.includes("Dual")) audios.dual++;
+      if (r.audio_tags.includes("Multi")) audios.multi++;
+      if (r.audio_tags.includes("Hindi Dubbed")) audios["hindi-dubbed"]++;
+    }
+    if (r.language_tag) {
+      langCounts[r.language_tag] = (langCounts[r.language_tag] || 0) + 1;
+    }
+    if (r.source) {
+      sources[r.source] = (sources[r.source] || 0) + 1;
+    }
+  }
+
+  const years = Object.keys(yearCounts)
+    .map(Number)
+    .sort((a, b) => b - a);
+  const languages = Object.entries(langCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([lang, count]) => ({ lang, count }));
+
+  const facets = {
+    totalUnfiltered: rows.length,
+    capped: rows.length >= 6000,
+    byCategory,
+    years,
+    yearCounts,
+    qualities,
+    audios,
+    languages,
+    sources,
+  };
+
+  if (searchFacetCache.size >= 30) {
+    const oldest = searchFacetCache.keys().next().value;
+    if (oldest !== undefined) searchFacetCache.delete(oldest);
+  }
+  searchFacetCache.set(cacheKey, { ver: catalogVersion, facets });
+  return facets;
 }
 
 export function queryItems({
@@ -660,15 +880,38 @@ export function queryItems({
   page = 1,
   limit = 36,
   deviceId = "default",
+  skipCount = false,
 } = {}) {
   const safeDevice = normalizeDeviceId(deviceId);
-  const where = ["m.is_primary = 1"];
+  const where = [];
   const params = [];
   let fromSql = "FROM media_items m";
+  let usedFts = false;
+  let usedSingleCategoryDriver = false;
+  let singleCharPrefix = false;
 
   const trimmedQ = (q || "").trim();
+  const cats = category
+    ? category
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
   if (trimmedQ) {
-    if (hasFts5) {
+    if (trimmedQ.length === 1) {
+      singleCharPrefix = true;
+      where.push("m.is_primary = 1");
+      if (/^[a-z0-9]$/i.test(trimmedQ)) {
+        const ch = trimmedQ.toLowerCase();
+        const nextCh = String.fromCharCode(ch.charCodeAt(0) + 1);
+        where.push("m.title >= ? COLLATE NOCASE AND m.title < ? COLLATE NOCASE");
+        params.push(ch, nextCh);
+      } else {
+        where.push("m.title LIKE ? COLLATE NOCASE");
+        params.push(`${trimmedQ}%`);
+      }
+    } else if (hasFts5) {
       const tokens = trimmedQ
         .replace(/["'*():^~-]/g, " ")
         .split(/\s+/)
@@ -676,28 +919,50 @@ export function queryItems({
         .slice(0, 8);
       if (tokens.length > 0) {
         const ftsExpr = tokens.map((t) => `"${t}"*`).join(" AND ");
-        fromSql = "FROM media_fts f JOIN media_items m ON m.id = f.rowid";
+        // CROSS JOIN guarantees SQLite drives from FTS5 index first instead of scanning 73k primary rows!
+        fromSql = "FROM media_fts f CROSS JOIN media_items m ON m.id = f.rowid";
         where.push("media_fts MATCH ?");
         params.push(ftsExpr);
+        where.push("m.is_primary = 1");
+        usedFts = true;
+      } else {
+        where.push("m.is_primary = 1");
       }
     } else {
+      where.push("m.is_primary = 1");
       where.push("(m.title LIKE ? OR m.raw_name LIKE ? OR m.sub_group LIKE ?)");
       const like = `%${trimmedQ}%`;
       params.push(like, like, like);
     }
+  } else if (cats.length === 1) {
+    // Drive directly from covering media_categories index (eliminates LIKE full-table scan!)
+    fromSql = "FROM media_categories mc CROSS JOIN media_items m ON m.id = mc.media_id";
+    where.push("mc.category = ?");
+    params.push(cats[0]);
+    where.push("m.is_primary = 1");
+    usedSingleCategoryDriver = true;
+  } else {
+    where.push("m.is_primary = 1");
   }
 
-  if (category) {
-    const cats = category.split(",").map((s) => s.trim()).filter(Boolean);
+  let facets = null;
+  if (trimmedQ && !skipCount) {
+    // Capture search-only base clauses BEFORE category/year/quality/audio/language/source narrowing
+    facets = computeSearchFacets(trimmedQ, singleCharPrefix, usedFts, fromSql, [...where], [...params]);
+  }
+
+  if (cats.length > 0 && !usedSingleCategoryDriver) {
     if (cats.length === 1) {
-      where.push("(m.category = ? OR m.categories_all LIKE ?)");
-      params.push(cats[0], `%,${cats[0]},%`);
-    } else if (cats.length > 1) {
-      const clauses = cats.map(() => "(m.category = ? OR m.categories_all LIKE ?)");
-      where.push(`(${clauses.join(" OR ")})`);
-      for (const c of cats) {
-        params.push(c, `%,${c},%`);
+      where.push("EXISTS(SELECT 1 FROM media_categories mc WHERE mc.media_id = m.id AND mc.category = ?)");
+      params.push(cats[0]);
+    } else {
+      const ph = cats.map(() => "?").join(",");
+      if (usedFts) {
+        where.push(`EXISTS(SELECT 1 FROM media_categories mc WHERE mc.media_id = m.id AND mc.category IN (${ph}))`);
+      } else {
+        where.push(`m.id IN (SELECT media_id FROM media_categories WHERE category IN (${ph}))`);
       }
+      params.push(...cats);
     }
   }
 
@@ -728,7 +993,7 @@ export function queryItems({
   }
 
   if (language) {
-    where.push("LOWER(m.language_tag) = LOWER(?)");
+    where.push("m.language_tag = ? COLLATE NOCASE");
     params.push(language);
   }
 
@@ -742,37 +1007,76 @@ export function queryItems({
 
   const whereSql = `WHERE ${where.join(" AND ")}`;
 
-  let orderSql = "ORDER BY m.modified_at DESC, COALESCE(m.year, 0) DESC, m.quality_score DESC, m.id DESC";
-  if (sort === "year") orderSql = "ORDER BY COALESCE(m.year, 0) DESC, m.modified_at DESC, m.quality_score DESC";
-  else if (sort === "quality") orderSql = "ORDER BY m.quality_score DESC, m.modified_at DESC, COALESCE(m.year, 0) DESC";
-  else if (sort === "title") orderSql = "ORDER BY m.title COLLATE NOCASE ASC";
-  else if (sort === "imdb") orderSql = "ORDER BY CASE WHEN m.imdb_rank IS NULL THEN 9999 ELSE m.imdb_rank END ASC, m.quality_score DESC";
-  else if (sort === "oldest") orderSql = "ORDER BY COALESCE(m.year, 9999) ASC, m.title COLLATE NOCASE ASC";
-  else if (trimmedQ && hasFts5 && sort === "relevance") orderSql = "ORDER BY bm25(media_fts), m.modified_at DESC, m.quality_score DESC";
-
   const safeLimit = Math.min(Math.max(Number(limit) || 36, 1), 120);
   const safePage = Math.max(Number(page) || 1, 1);
   const offset = (safePage - 1) * safeLimit;
 
-  const totalRow = db.prepare(`SELECT COUNT(*) as total ${fromSql} ${whereSql}`).get(...params);
+  const hasExtraFilters = Boolean(group || mediaType || year || quality || source || language || audio);
+
+  let total = 0;
+  if (!skipCount) {
+    if (usedSingleCategoryDriver && !hasExtraFilters) {
+      total = db.prepare("SELECT COUNT(*) as total FROM media_categories WHERE category = ?").get(cats[0]).total;
+    } else {
+      total = db.prepare(`SELECT COUNT(*) as total ${fromSql} ${whereSql}`).get(...params).total;
+    }
+  }
+
+  let orderSql = "ORDER BY m.modified_at DESC, m.year DESC, m.quality_score DESC, m.id DESC";
+  const extraOrderParams = [];
+
+  if (usedSingleCategoryDriver && !hasExtraFilters && sort === "recent") {
+    orderSql = "ORDER BY mc.modified_at DESC, mc.year DESC, mc.quality_score DESC, mc.media_id DESC";
+  } else if (usedSingleCategoryDriver && !hasExtraFilters && sort === "imdb") {
+    orderSql = "ORDER BY CASE WHEN mc.imdb_rank IS NULL THEN 9999 ELSE mc.imdb_rank END ASC, mc.quality_score DESC, mc.media_id DESC";
+  } else if (sort === "year") {
+    orderSql = "ORDER BY m.year DESC, m.modified_at DESC, m.quality_score DESC, m.id DESC";
+  } else if (sort === "quality") {
+    orderSql = "ORDER BY m.quality_score DESC, m.modified_at DESC, m.year DESC";
+  } else if (sort === "title" || (singleCharPrefix && sort === "relevance")) {
+    orderSql = "ORDER BY m.title COLLATE NOCASE ASC";
+  } else if (sort === "imdb") {
+    orderSql = "ORDER BY CASE WHEN m.imdb_rank IS NULL THEN 9999 ELSE m.imdb_rank END ASC, m.quality_score DESC";
+  } else if (sort === "oldest") {
+    orderSql = "ORDER BY CASE WHEN m.year IS NULL THEN 9999 ELSE m.year END ASC, m.title COLLATE NOCASE ASC";
+  } else if (usedFts && sort === "relevance") {
+    if (!skipCount && total > 1500) {
+      // Broad 2-char prefix matching thousands of docs: prioritize exact title prefix without heavy bm25 scan
+      orderSql = "ORDER BY CASE WHEN m.title LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END, m.modified_at DESC, m.quality_score DESC";
+      extraOrderParams.push(`${trimmedQ}%`);
+    } else {
+      // Exact title -> prefix match -> weighted FTS5 bm25 (title weighted 10x)
+      orderSql =
+        "ORDER BY CASE WHEN LOWER(m.title) = LOWER(?) THEN 0 WHEN m.title LIKE ? COLLATE NOCASE THEN 1 ELSE 2 END, bm25(media_fts, 10.0, 2.0, 1.5, 1.0, 0.5, 0.5), m.modified_at DESC, m.quality_score DESC";
+      extraOrderParams.push(trimmedQ, `${trimmedQ}%`);
+    }
+  }
+
   const rows = db.prepare(`
     SELECT m.id, m.url, m.category, m.media_type, m.sub_group, m.title, m.raw_name,
            m.year, m.quality, m.audio_tags, m.source_tag, m.language_tag,
            m.imdb_rank, m.modified_at, m.poster_url, m.poster_checked,
-           m.source, m.quality_score,
-           EXISTS(SELECT 1 FROM watchlist w WHERE w.device_id = ? AND w.media_id = m.id) AS in_watchlist
+           m.source, m.quality_score
     ${fromSql}
     ${whereSql}
     ${orderSql}
     LIMIT ? OFFSET ?
-  `).all(safeDevice, ...params, safeLimit, offset);
+  `).all(...params, ...extraOrderParams, safeLimit, offset);
+
+  const wlIds = skipCount ? null : getWatchlistIds(safeDevice);
+  if (wlIds && wlIds.size > 0) {
+    for (const r of rows) r.in_watchlist = wlIds.has(r.id) ? 1 : 0;
+  } else {
+    for (const r of rows) r.in_watchlist = 0;
+  }
 
   return {
     items: rows,
-    total: totalRow.total,
+    total: skipCount ? rows.length : total,
     page: safePage,
     limit: safeLimit,
-    totalPages: Math.ceil(totalRow.total / safeLimit),
+    totalPages: skipCount ? 1 : Math.ceil(total / safeLimit),
+    ...(facets ? { facets } : {}),
   };
 }
 

@@ -72,14 +72,16 @@
 
                 <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingBottom="28dp">
 
-                    <!-- Empty state -->
-                    <LinearLayout android:id="@+id/home_empty_box" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:orientation="vertical" android:padding="32dp" android:visibility="gone">
+                    <!-- Empty / Offline state -->
+                    <LinearLayout android:id="@+id/home_empty_box" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:orientation="vertical" android:padding="28dp" android:visibility="gone">
 
-                        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Ready to Sync All Servers" android:textColor="@color/cv_text" android:textSize="20sp" android:textStyle="bold" />
+                        <TextView android:id="@+id/home_empty_title" android:layout_width="wrap_content" android:layout_height="wrap_content" android:gravity="center" android:text="No Active Online Servers" android:textColor="@color/cv_text" android:textSize="20sp" android:textStyle="bold" />
 
-                        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:gravity="center" android:text="Connect to your BDIX Wi-Fi network and sync DhakaFlix, ICC FTP, CircleFTP, and DiscoveryFTP directly onto your device." android:textColor="@color/cv_text_muted" android:textSize="13.5sp" />
+                        <TextView android:id="@+id/home_empty_subtitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:gravity="center" android:text="Offline servers are automatically hidden so you only see playable content. Scan your Wi-Fi using bdix.link to find and sync every open FTP server automatically." android:textColor="@color/cv_text_muted" android:textSize="13sp" />
 
-                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_home_sync_now" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="18dp" android:text="Sync Library Now" app:backgroundTint="@color/cv_accent" />
+                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_home_bdix_scan" android:layout_width="wrap_content" android:layout_height="44dp" android:layout_marginTop="16dp" android:text="Scan My Wi-Fi (BDIX Test)" android:textAllCaps="false" app:backgroundTint="#0284C7" />
+
+                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_home_sync_now" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content" android:layout_height="40dp" android:layout_marginTop="8dp" android:text="Manage Servers / Sync" android:textAllCaps="false" android:textColor="@color/cv_text" app:strokeColor="@color/cv_border" />
                     </LinearLayout>
 
                     <!-- Hero Spotlight -->
@@ -323,6 +325,22 @@
 
                         <Spinner android:id="@+id/spin_auto_sync_interval" android:layout_width="170dp" android:layout_height="38dp" android:background="@drawable/bg_input_box" />
                     </LinearLayout>
+                </LinearLayout>
+
+                <!-- 2b. Built-in Wi-Fi BDIX Server Scanner (https://bdix.link/test/server) -->
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/bg_card_rounded" android:orientation="vertical" android:padding="14dp">
+
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Wi-Fi BDIX Server Scanner (bdix.link)" android:textColor="@color/cv_sky" android:textSize="14.5sp" android:textStyle="bold" />
+
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="Tests open FTP servers available on your current Wi-Fi and automatically syncs only open servers into your library." android:textColor="@color/cv_text_muted" android:textSize="11.8sp" />
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/btn_srv_bdix_scan" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="10dp" android:text="Run Wi-Fi BDIX Server Test &amp; Auto-Sync" android:textAllCaps="false" android:textSize="12.5sp" app:backgroundTint="#0284C7" />
+
+                    <TextView android:id="@+id/srv_bdix_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:textColor="@color/cv_sky" android:textSize="11.5sp" android:visibility="gone" />
+
+                    <ProgressBar android:id="@+id/srv_bdix_progress" style="?android:attr/progressBarStyleHorizontal" android:layout_width="match_parent" android:layout_height="5dp" android:layout_marginTop="5dp" android:max="100" android:progressTint="@color/cv_sky" android:visibility="gone" />
+
+                    <LinearLayout android:id="@+id/srv_bdix_results" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:orientation="vertical" android:visibility="gone" />
                 </LinearLayout>
 
                 <!-- 3. Dynamic Source Servers Manager -->

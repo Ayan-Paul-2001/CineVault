@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import com.cinevault.app.data.BdixScannerService;
 import com.cinevault.app.data.H5aiService;
 import com.cinevault.app.data.IccService;
 import com.cinevault.app.data.MediaDownloadManager;
@@ -333,5 +334,43 @@ public class CineVaultUnitTest {
         assertFalse(UpdateService.shouldShowV142ServerFeaturePopup("2.0.0", false));
         assertFalse(UpdateService.shouldShowV142ServerFeaturePopup("1.4.0", false));
         assertFalse(UpdateService.shouldShowV142ServerFeaturePopup(null, false));
+    }
+
+    @Test
+    public void bdixScannerParsesBdixLinkHtmlAndFiltersToFtpVideoOnly() {
+        String sampleHtml = "<script>$(document).ready(function(){"
+                + "const sites = ["
+                + "{\"id\":1,\"title\":\"Free Media BD\",\"category\":\"FTP\",\"url\":\"http://www.freemediabd.com\"},"
+                + "{\"id\":2,\"title\":\"Movie Bazar\",\"category\":\"Video\",\"url\":\"http://moviebazar.net\"},"
+                + "{\"id\":3,\"title\":\"JagoBD\",\"category\":\"TV\",\"url\":\"http://www.jagobd.com\"},"
+                + "{\"id\":4,\"title\":\"Mango Gamers\",\"category\":\"Game\",\"url\":\"https://mangogamers.com\"},"
+                + "{\"id\":5,\"title\":\"ICC FTP\",\"category\":\"Video\",\"url\":\"http://10.16.100.244\"},"
+                + "{\"id\":6,\"title\":\"DhakaFlix 7\",\"category\":\"FTP\",\"url\":\"http://172.16.50.7\"},"
+                + "{\"id\":7,\"title\":\"CircleFTP\",\"category\":\"Video\",\"url\":\"http://circleftp.net\"}"
+                + "];});</script>";
+
+        List<BdixScannerService.DirectoryCandidate> cands = BdixScannerService.parseBdixHtmlCandidates(sampleHtml);
+        boolean hasFreeMedia = false, hasMovieBazar = false, hasTv = false, hasGame = false;
+        int iccCount = 0, df7Count = 0, circleCount = 0;
+        for (BdixScannerService.DirectoryCandidate c : cands) {
+            if ("http://www.freemediabd.com".equals(c.origin)) hasFreeMedia = true;
+            if ("http://moviebazar.net".equals(c.origin)) hasMovieBazar = true;
+            if (c.url.contains("jagobd")) hasTv = true;
+            if (c.url.contains("mangogamers")) hasGame = true;
+            if ("http://10.16.100.244".equals(c.origin)) iccCount++;
+            if ("http://172.16.50.7".equals(c.origin)) df7Count++;
+            if ("http://new.circleftp.net".equals(c.origin)) circleCount++;
+        }
+        assertTrue(hasFreeMedia);
+        assertTrue(hasMovieBazar);
+        assertFalse(hasTv);
+        assertFalse(hasGame);
+        assertEquals(1, iccCount); // Deduplicated cleanly with built-in ICC node
+        assertEquals(1, df7Count); // Deduplicated cleanly with built-in DhakaFlix 7 node
+        assertEquals(1, circleCount); // Deduplicated cleanly with built-in CircleFTP node
+
+        // Fallback list works gracefully if bdix.link HTML is unavailable
+        List<BdixScannerService.DirectoryCandidate> fallback = BdixScannerService.parseBdixHtmlCandidates(null);
+        assertTrue(fallback.size() >= 15);
     }
 }

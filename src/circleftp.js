@@ -311,7 +311,10 @@ export async function checkCircleHealth() {
     const r = await fetch(`${CIRCLEFTP_API}/posts?limit=1&page=1`, {
       signal: AbortSignal.timeout(3500),
     });
-    return { online: r.ok, latencyMs: Date.now() - t0 };
+    if (!r.ok) return { online: false, latencyMs: null };
+    const text = (await r.text()).trim();
+    const valid = text.startsWith("{") && text.includes('"posts"');
+    return { online: valid, latencyMs: valid ? Date.now() - t0 : null };
   } catch {
     return { online: false, latencyMs: null };
   }

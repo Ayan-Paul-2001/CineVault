@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.cinevault.app.data.AppDatabase;
+import com.cinevault.app.data.BdixScannerService;
 import com.cinevault.app.data.CircleFtpService;
 import com.cinevault.app.data.H5aiService;
 import com.cinevault.app.data.IccService;
@@ -67,7 +68,8 @@ public final class CineVaultApp extends Application {
         CircleFtpService circle = new CircleFtpService(httpClient);
         MetadataService meta = new MetadataService(db, h5ai, icc, circle, httpClient);
         UpdateService updater = new UpdateService(httpClient);
-        repository = new MediaRepository(db, h5ai, icc, circle, meta, updater);
+        BdixScannerService bdixScanner = new BdixScannerService(httpClient);
+        repository = new MediaRepository(db, h5ai, icc, circle, meta, updater, bdixScanner);
         playbackManager = new PlaybackManager(this);
     }
 

@@ -36,10 +36,12 @@ import {
   getSyncStatus,
   syncEvents,
   getServersHealth,
+  hasCheckedServerHealth,
   invalidateHealthCache,
   scheduleAutoSync,
   updateAutoSyncSettings,
 } from "./src/indexer.js";
+import { startBdixWifiScan, getBdixScanStatus, bdixScanEvents } from "./src/bdixScanner.js";
 import { hydrateItem, hydrateAllEditions, enrichItemMetadata, servePoster, safeJson } from "./src/metadata.js";
 import { listDirectory, searchUpstream, probeDirectoryServer } from "./src/h5ai.js";
 import { searchIccUpstream, getIccSession, setIccSession } from "./src/icc.js";
@@ -308,8 +310,21 @@ const server = http.createServer(async (req, res) => {
       if (pathname === "/api/servers/reset" && method === "POST") {
         const servers = resetDefaultServers();
         invalidateHealthCache();
+        await getServersHealth(true);
         invalidateHomeCache();
-        return sendJson(res, { ok: true, servers, stats: getLibraryStats(true) });
+        return sendJson(res, { ok: true, servers: getAllServers(), stats: getLibraryStats(true) });
+      }
+      if (pathname === "/api/servers/bdix-scan" && method === "POST") {
+        const body = await readJsonBody(req).catch(() => ({}));
+        const result = await startBdixWifiScan({ autoSync: body.autoSync !== false });
+        return sendJson(res, result);
+      }
+      if (pathname === "/api/servers/bdix-scan/status" && method === "GET") {
+        return sendJson(res, {
+          scan: getBdixScanStatus(),
+          stats: getLibraryStats(),
+          sync: getSyncStatus(),
+        });
       }
       const srvToggleMatch = pathname.match(/^\/api\/servers\/([^/]+)\/toggle$/);
       if (srvToggleMatch && method === "POST") {
@@ -318,6 +333,9 @@ const server = http.createServer(async (req, res) => {
         try {
           const updated = setServerEnabled(id, Boolean(body.enabled));
           invalidateHealthCache();
+          if (body.enabled) {
+            await getServersHealth(true).catch(() => {});
+          }
           invalidateHomeCache();
           return sendJson(res, { ok: true, server: updated, servers: getAllServers(), stats: getLibraryStats(true) });
         } catch (err) {
@@ -342,9 +360,16 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // 3. Home curated feed (per-device private Continue Watching & Watchlist)
+      // 3. Home curated feed (per-device private Continue Watching & Watchlist — strictly ONLINE active servers only!)
       const deviceId = getRequestDeviceId(req);
       if (pathname === "/api/home" && method === "GET") {
+        if (!hasCheckedServerHealth()) {
+          await Promise.race([
+            getServersHealth(true).catch(() => {}),
+            new Promise((r) => setTimeout(r, 4500)),
+          ]);
+          invalidateHomeCache();
+        }
         return sendJson(res, buildHomePayload(deviceId));
       }
 
@@ -673,16 +698,33 @@ const server = http.createServer(async (req, res) => {
         const sendEvent = (type, payload) => {
           res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
         };
-        sendEvent("status", { sync: getSyncStatus(), stats: getLibraryStats(false, 10000) });
+        sendEvent("status", {
+          sync: getSyncStatus(),
+          stats: getLibraryStats(false, 10000),
+          scan: getBdixScanStatus(),
+        });
 
         const onProgress = (st) => sendEvent("progress", { sync: st, stats: getLibraryStats(false, 10000) });
         const onDone = (st) => {
           invalidateHomeCache();
           sendEvent("done", { sync: st, stats: getLibraryStats(true) });
         };
+        const onHealth = (payload) => {
+          invalidateHomeCache();
+          sendEvent("health", {
+            sync: getSyncStatus(),
+            stats: payload?.stats || getLibraryStats(true),
+            servers: payload?.servers || [],
+          });
+        };
+        const onBdix = (scan) => {
+          sendEvent("bdix", { scan, stats: getLibraryStats(false, 5000) });
+        };
         syncEvents.on("start", onProgress);
         syncEvents.on("progress", onProgress);
         syncEvents.on("done", onDone);
+        syncEvents.on("health", onHealth);
+        bdixScanEvents.on("update", onBdix);
 
         const ping = setInterval(() => res.write(": keepalive\n\n"), 20000);
         req.on("close", () => {
@@ -690,6 +732,8 @@ const server = http.createServer(async (req, res) => {
           syncEvents.off("start", onProgress);
           syncEvents.off("progress", onProgress);
           syncEvents.off("done", onDone);
+          syncEvents.off("health", onHealth);
+          bdixScanEvents.off("update", onBdix);
         });
         return;
       }
@@ -797,28 +841,44 @@ server.listen(PORT, HOST, () => {
 
   scheduleAutoSync();
 
-  const lastSync = Number(stats.lastSync || 0);
-  const enabledList = getEnabledServers();
-  const hasEnabledIcc = enabledList.some((s) => s.adapter === "icc");
-  const hasEnabledCircle = enabledList.some((s) => s.adapter === "circleftp");
-  const hasEnabledDisc = enabledList.some((s) => s.adapter === "discoveryftp");
-  const hasIcc = (stats.bySource?.icc || 0) > 0;
-  const hasCircle = (stats.bySource?.circleftp || 0) > 0;
-  const hasDiscovery = (stats.bySource?.discoveryftp || 0) > 0;
-  if (stats.total === 0 && enabledList.length > 0) {
-    console.log("  [indexer] First launch detected — starting full multi-server sync...");
-    startSync("full");
-  } else if (hasEnabledDisc && !hasDiscovery) {
-    console.log("  [indexer] DiscoveryFTP enabled — syncing DiscoveryFTP & merging highest quality...");
-    startSync("discovery");
-  } else if (hasEnabledCircle && !hasCircle) {
-    console.log("  [indexer] CircleFTP enabled — syncing CircleFTP & merging highest quality...");
-    startSync("circle");
-  } else if (hasEnabledIcc && !hasIcc) {
-    console.log("  [indexer] ICC FTP server enabled — syncing ICC FTP & merging highest quality...");
-    startSync("icc");
-  } else if (enabledList.length > 0 && Date.now() - lastSync > 1000 * 60 * 60) {
-    console.log("  [indexer] Running quick incremental sync for newly uploaded files...");
-    startSync("quick");
-  }
+  // Immediately verify live server reachability on THIS Wi-Fi so offline servers NEVER show stale preloaded content!
+  (async () => {
+    try {
+      const liveHealth = await getServersHealth(true);
+      invalidateHomeCache();
+      const onlineList = liveHealth.filter((s) => s.enabled && s.online);
+      const freshStats = getLibraryStats(true);
+      console.log(`  [health] Active online servers on this Wi-Fi: ${onlineList.length}/${liveHealth.length} (${freshStats.total} visible titles)`);
+
+      if (onlineList.length === 0) return;
+      const lastSync = Number(freshStats.lastSync || 0);
+      const hasOnlineIcc = onlineList.some((s) => s.adapter === "icc");
+      const hasOnlineCircle = onlineList.some((s) => s.adapter === "circleftp");
+      const hasOnlineDisc = onlineList.some((s) => s.adapter === "discoveryftp");
+      const hasIcc = (freshStats.bySource?.icc || 0) > 0;
+      const hasCircle = (freshStats.bySource?.circleftp || 0) > 0;
+      const hasDiscovery = (freshStats.bySource?.discoveryftp || 0) > 0;
+
+      if (freshStats.total === 0) {
+        console.log("  [indexer] Starting sync for open servers on this Wi-Fi...");
+        startSync("full");
+      } else if (hasOnlineDisc && !hasDiscovery) {
+        startSync("discovery");
+      } else if (hasOnlineCircle && !hasCircle) {
+        startSync("circle");
+      } else if (hasOnlineIcc && !hasIcc) {
+        startSync("icc");
+      } else if (Date.now() - lastSync > 1000 * 60 * 60) {
+        startSync("quick");
+      }
+    } catch {}
+  })();
+
+  // Periodic reachability watchdog (90s) so Wi-Fi switches / offline servers automatically hide & restore live!
+  const healthWatchdog = setInterval(() => {
+    if (!getSyncStatus().running && !getBdixScanStatus().running) {
+      getServersHealth(true).catch(() => {});
+    }
+  }, 90 * 1000);
+  healthWatchdog.unref?.();
 });

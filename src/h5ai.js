@@ -362,6 +362,8 @@ function extractPortalDirectoryLinks(origin, html) {
   return { origin: bestOrigin, entries: bestEntries };
 }
 
+const REAL_DIR_HTML_RE = /_h5ai|class=["']fb-n["']|<title>\s*Index of\b|<h1[^>]*>\s*Index of\b|Directory listing for\b|Parent Directory|\[To Parent Directory\]|<pre[^>]*>\s*<a\s+href=/i;
+
 async function fetchDirectoryWithProtocol(origin, href, timeoutMs) {
   const normHref = encodeHrefPath(href.endsWith("/") ? href : `${href}/`);
   const targetUrl = origin + normHref;
@@ -376,7 +378,14 @@ async function fetchDirectoryWithProtocol(origin, href, timeoutMs) {
     if (res.ok && (res.headers.get("content-type") || "").includes("json")) {
       const data = await res.json();
       if (Array.isArray(data.items)) {
-        return { protocol: "h5ai", origin, href: normHref, redirectedExternal: false, entries: extractDirectChildren(origin, normHref, data.items) };
+        return {
+          protocol: "h5ai",
+          origin,
+          href: normHref,
+          redirectedExternal: false,
+          isDirectoryListing: true,
+          entries: extractDirectChildren(origin, normHref, data.items),
+        };
       }
     }
   } catch {}
@@ -404,14 +413,18 @@ async function fetchDirectoryWithProtocol(origin, href, timeoutMs) {
     }
   } catch {}
 
+  const entries = parseHtmlFallback(effectiveOrigin, effectiveHref, html);
+  const hasVideos = entries.some((e) => !e.isDir && e.kind === "video");
+  const isDirectoryListing = !redirectedExternal && (REAL_DIR_HTML_RE.test(html) || hasVideos);
   const protocol = html.includes("_h5ai") || html.includes('class="fb-n"') ? "h5ai" : "autoindex";
   return {
     protocol,
     origin: effectiveOrigin,
     href: effectiveHref,
     redirectedExternal,
+    isDirectoryListing,
     html,
-    entries: parseHtmlFallback(effectiveOrigin, effectiveHref, html),
+    entries,
   };
 }
 
@@ -447,17 +460,31 @@ async function detectIccPortal(origin, rawUrl, timeoutMs) {
 async function detectCircleFtpApi(origin, rawUrl, timeoutMs) {
   const u = new URL(rawUrl);
   const host = u.hostname.toLowerCase();
-  const apiUrl = u.port === "5000" ? `${origin}/api/posts?page=1` : `http://${u.hostname}:5000/api/posts?page=1`;
   const urlHintsCircle = host.includes("circleftp") || /^15\.1\.1\.\d{1,3}$/.test(host);
-  if (!urlHintsCircle && u.pathname !== "/" && u.pathname !== "") return false;
-  try {
-    const r = await fetch(apiUrl, { signal: AbortSignal.timeout(Math.min(timeoutMs, 3000)) });
-    if (r.ok) {
-      const data = await r.json().catch(() => null);
-      if (data && (Array.isArray(data.posts) || Array.isArray(data))) return true;
+  if (!urlHintsCircle && u.pathname !== "/" && u.pathname !== "") return null;
+
+  const candidates = [];
+  if (u.port === "5000") {
+    candidates.push({ apiUrl: `${origin}/api/posts?page=1&limit=1`, resolvedOrigin: origin });
+  } else {
+    candidates.push({ apiUrl: `http://${u.hostname}:5000/api/posts?page=1&limit=1`, resolvedOrigin: `http://${u.hostname}` });
+    if (host === "circleftp.net" || host === "www.circleftp.net") {
+      candidates.push({ apiUrl: "http://new.circleftp.net:5000/api/posts?page=1&limit=1", resolvedOrigin: "http://new.circleftp.net" });
     }
-  } catch {}
-  return false;
+  }
+
+  for (const c of candidates) {
+    try {
+      const r = await fetch(c.apiUrl, { signal: AbortSignal.timeout(Math.min(timeoutMs, 3000)) });
+      if (r.ok) {
+        const data = await r.json().catch(() => null);
+        if (data && (Array.isArray(data.posts) || Array.isArray(data))) {
+          return c.resolvedOrigin;
+        }
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /**
@@ -472,8 +499,8 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
   const t0 = Date.now();
 
   // 1. Live-probe specialized BDIX portals (ICC FTP & CircleFTP) first so pasting
-  //    http://10.16.100.244/dashboard.php or http://new.circleftp.net auto-detects cleanly!
-  const [isIcc, isCircle] = await Promise.all([
+  //    http://10.16.100.244/dashboard.php or http://circleftp.net auto-detects cleanly!
+  const [isIcc, circleOrigin] = await Promise.all([
     detectIccPortal(origin, u.toString(), timeoutMs),
     detectCircleFtpApi(origin, u.toString(), timeoutMs),
   ]);
@@ -504,7 +531,7 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
     };
   }
 
-  if (isCircle) {
+  if (circleOrigin) {
     const circleSections = [
       { name: "Movies (4K / 1080p / Dual Audio)", category: "english-1080p", mediaType: "movie" },
       { name: "Hindi & Bollywood Movies", category: "hindi", mediaType: "movie" },
@@ -516,7 +543,7 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
       name: s.name,
       folderName: s.name,
       href: `/api/posts?section=${idx + 1}`,
-      url: `${origin}/`,
+      url: `${circleOrigin}/`,
       category: s.category,
       mediaType: s.mediaType,
       mode: "circleftp",
@@ -525,7 +552,7 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
     }));
     return {
       ok: true,
-      origin,
+      origin: circleOrigin,
       rootHref: "/",
       suggestedName: "CircleFTP",
       protocol: "circleftp",
@@ -542,18 +569,28 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
   let protocol = rootProbe.protocol;
   let effectiveOrigin = rootProbe.redirectedExternal ? origin : rootProbe.origin;
   let effectiveRootHref = rootProbe.redirectedExternal ? rootHref : rootProbe.href;
+  let fromPortalHomepage = false;
 
-  let rootDirs = rootProbe.entries.filter((e) => e.isDir);
-  const rootVideos = rootProbe.entries.filter((e) => !e.isDir && e.kind === "video");
+  let rootDirs = rootProbe.isDirectoryListing ? rootProbe.entries.filter((e) => e.isDir) : [];
+  const rootVideos = rootProbe.isDirectoryListing ? rootProbe.entries.filter((e) => !e.isDir && e.kind === "video") : [];
 
   // Portal homepage fallback (e.g. DhakaFlix http://172.16.50.14/ W3layouts portal linking to /DHAKA-FLIX-14/...):
-  // Extract directory links directly from the portal HTML (including sibling LAN/subdomain media nodes if needed)!
+  // Extract candidate directory links from the portal HTML and verify each target is a REAL directory index!
   if (rootDirs.length === 0 && rootVideos.length === 0 && rootProbe.html && !rootProbe.redirectedExternal) {
     const portalRes = extractPortalDirectoryLinks(effectiveOrigin, rootProbe.html);
     if (portalRes.entries.length > 0) {
       effectiveOrigin = portalRes.origin;
-      rootDirs = portalRes.entries;
+      // Prioritize genuine media/FTP links (trailing-slash multi-segment paths & known category keywords)
+      const portalScore = (e) => {
+        let sc = 0;
+        if (e.href.split("/").filter(Boolean).length >= 2) sc += 30;
+        if (/dhaka-?flix|ftp|movie|film|series|hindi|english|bangla|south|anime|4k|1080p|media|data|video|cartoon/i.test(e.href)) sc += 25;
+        if (classifyDiscoveredFolder(e.name).skipDefault) sc -= 50;
+        return sc;
+      };
+      rootDirs = [...portalRes.entries].sort((a, b) => portalScore(b) - portalScore(a)).slice(0, 24);
       protocol = "portal";
+      fromPortalHomepage = true;
     }
   }
 
@@ -610,6 +647,11 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
     await mapWithConcurrency(inspectable.slice(0, 24), 4, async ({ d, displayPath, mergedCls }) => {
       try {
         const sub = await fetchDirectoryWithProtocol(effectiveOrigin, d.href, Math.min(timeoutMs, 5500));
+        // When inspecting links extracted from an HTML portal homepage, ONLY accept targets that are REAL
+        // directory listings (h5ai / Apache / Nginx / Caddy / IIS / direct video files) — rejects WordPress/CMS pages!
+        if (fromPortalHomepage && !sub.isDirectoryListing) {
+          return;
+        }
         const subDirs = sub.entries.filter((e) => e.isDir);
         const subVideos = sub.entries.filter((e) => !e.isDir && e.kind === "video");
 
@@ -658,7 +700,9 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
         // Default: treat as a valid media folder
         addDiscovered(d, displayPath, mergedCls, ratioBuckets > 0 ? "bucketed" : "flat", subDirs.length);
       } catch {
-        addDiscovered(d, displayPath, mergedCls, mergedCls.mode, 0);
+        if (!fromPortalHomepage) {
+          addDiscovered(d, displayPath, mergedCls, mergedCls.mode, 0);
+        }
       }
     });
   };
@@ -666,7 +710,10 @@ export async function probeDirectoryServer(rawUrl, timeoutMs = 8000) {
   if (rootDirs.length > 0) {
     const rootBuckets = rootDirs.filter((d) => isBucketLikeName(d.name)).length;
     const rootTitles = rootDirs.filter((d) => isTitleLikeName(d.name)).length;
-    if (rootBuckets / rootDirs.length >= 0.5 || rootTitles / rootDirs.length >= 0.45 || rootDirs.length >= 30) {
+    if (
+      !fromPortalHomepage &&
+      (rootBuckets / rootDirs.length >= 0.5 || rootTitles / rootDirs.length >= 0.45 || rootDirs.length >= 30)
+    ) {
       const rootName = safeDecode(effectiveRootHref.replace(/^\/|\/$/g, "").split("/").pop() || u.hostname);
       const cls = classifyDiscoveredFolder(rootName);
       addDiscovered(
@@ -779,12 +826,31 @@ export async function checkServerHealth(server) {
     try {
       await res.body?.cancel();
     } catch {}
-    const ok = res.ok || (res.status >= 300 && res.status < 400) || res.status === 405;
+    let ok = res.ok || res.status === 405;
+    let reason = ok ? null : `HTTP ${res.status}`;
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location") || "";
+      if (/notice\.html|blocked|unauthorized|suspended|captive|login\.php/i.test(loc)) {
+        ok = false;
+        reason = "Blocked or redirected by ISP/carrier";
+      } else if (loc) {
+        try {
+          const targetHost = new URL(loc, pingUrl).hostname.toLowerCase();
+          const baseHost = new URL(pingUrl).hostname.toLowerCase();
+          ok = targetHost === baseHost || sameLanOrParentDomain(new URL(loc, pingUrl).origin, server.origin);
+          if (!ok) reason = "Redirected off-server";
+        } catch {
+          ok = true;
+        }
+      } else {
+        ok = true;
+      }
+    }
     return {
       ...server,
       online: ok,
       latencyMs: ok ? Date.now() - t0 : null,
-      reason: ok ? null : `HTTP ${res.status}`,
+      reason,
     };
   } catch (err) {
     const code = err?.cause?.code || err?.name || "";

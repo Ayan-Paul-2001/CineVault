@@ -35,6 +35,7 @@ import {
   getAllServers,
   getEnabledServers,
   updateServerFolders,
+  updateServersOnlineStatus,
 } from "./db.js";
 import { hydrateItem } from "./metadata.js";
 
@@ -830,34 +831,58 @@ function buildCircleRow(post) {
 
 let cachedHealth = null;
 let healthCheckedAt = 0;
+let healthCheckPromise = null;
 
 export function invalidateHealthCache() {
   cachedHealth = null;
   healthCheckedAt = 0;
 }
 
+export function hasCheckedServerHealth() {
+  return healthCheckedAt > 0;
+}
+
 export async function getServersHealth(force = false) {
   if (!force && cachedHealth && Date.now() - healthCheckedAt < 30000) {
     return cachedHealth;
   }
-  const allServers = getAllServers();
-  const results = await Promise.all(
-    allServers.map(async (s) => {
-      if (!s.enabled) {
-        return { ...s, online: false, latencyMs: null, reason: "Disabled" };
+  if (healthCheckPromise) return healthCheckPromise;
+
+  healthCheckPromise = (async () => {
+    try {
+      const allServers = getAllServers();
+      const results = await Promise.all(
+        allServers.map(async (s) => {
+          if (!s.enabled) {
+            return { ...s, online: false, latencyMs: null, reason: "Disabled" };
+          }
+          if (s.adapter === "icc") {
+            const icc = await checkIccHealth();
+            return { ...s, ...icc };
+          }
+          if (s.adapter === "circleftp") {
+            const cf = await checkCircleHealth();
+            return { ...s, ...cf };
+          }
+          return checkServerHealth(s);
+        })
+      );
+
+      const onlineMap = {};
+      for (const r of results) {
+        onlineMap[r.id] = Boolean(r.enabled && r.online);
       }
-      if (s.adapter === "icc") {
-        const icc = await checkIccHealth();
-        return { ...s, ...icc };
+      const { changed } = updateServersOnlineStatus(onlineMap);
+      cachedHealth = results;
+      healthCheckedAt = Date.now();
+      if (changed) {
+        syncEvents.emit("health", { servers: results, stats: getLibraryStats(true) });
+        emitProgress("status", true);
       }
-      if (s.adapter === "circleftp") {
-        const cf = await checkCircleHealth();
-        return { ...s, ...cf };
-      }
-      return checkServerHealth(s);
-    })
-  );
-  cachedHealth = results;
-  healthCheckedAt = Date.now();
-  return results;
+      return results;
+    } finally {
+      healthCheckPromise = null;
+    }
+  })();
+  return healthCheckPromise;
 }

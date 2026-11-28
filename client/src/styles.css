@@ -3030,3 +3030,118 @@ a {
 .toggle-switch.sm.on::after {
   transform: translateX(15px);
 }
+
+/* --- WI-FI BDIX SERVER SCANNER (bdix.link) --- */
+.bdix-scanner-card {
+  background: linear-gradient(155deg, rgba(14, 30, 56, 0.72), rgba(10, 15, 29, 0.92));
+  border-color: rgba(56, 189, 248, 0.28);
+}
+
+.btn-sky {
+  background: linear-gradient(135deg, #0284c7, #0369a1);
+  color: #fff;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: 0 4px 14px rgba(2, 132, 199, 0.28);
+}
+.btn-sky:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.bdix-scan-progress-box {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(5, 9, 18, 0.65);
+  border: 1px solid rgba(56, 189, 248, 0.16);
+}
+
+.bdix-result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.bdix-filter-pill {
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.bdix-filter-pill.active {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.48);
+  color: #e0f2fe;
+}
+
+.bdix-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+  max-height: 210px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.bdix-result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  border-left: 2.5px solid #475569;
+}
+.bdix-result-row.synced {
+  border-left-color: var(--green);
+  background: rgba(34, 197, 94, 0.07);
+}
+.bdix-result-row.open {
+  border-left-color: var(--sky);
+}
+.bdix-result-row.closed {
+  opacity: 0.58;
+}
+
+.bdix-row-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bdix-row-url {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bdix-row-pill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+.bdix-row-pill.synced {
+  background: rgba(34, 197, 94, 0.18);
+  color: var(--green);
+}
+.bdix-row-pill.open {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--sky);
+}
+.bdix-row-pill.closed {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}

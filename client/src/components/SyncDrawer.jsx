@@ -32,6 +32,8 @@ const BUILTIN_SOURCE_LABELS = {
 export default function SyncDrawer({
   sync,
   stats,
+  autoStartBdixScan = false,
+  onAutoStartHandled,
   onClose,
   onTriggerSync,
   onServersChanged,
@@ -39,6 +41,12 @@ export default function SyncDrawer({
 }) {
   const [health, setHealth] = useState(null);
   const [checking, setChecking] = useState(false);
+
+  // Built-in BDIX Wi-Fi Server Scanner (https://bdix.link/test/server) state
+  const [bdixScan, setBdixScan] = useState(null);
+  const [showBdixResults, setShowBdixResults] = useState(false);
+  const [bdixFilter, setBdixFilter] = useState("open"); // "open" | "all"
+  const prevBdixRunningRef = useRef(false);
 
   // Add Server Studio state (100% automatic protocol & directory detection — zero manual protocol picker!)
   const [showAddForm, setShowAddForm] = useState(false);
@@ -67,7 +75,53 @@ export default function SyncDrawer({
 
   useEffect(() => {
     loadHealth(false);
+    apiGet("/api/servers/bdix-scan/status")
+      .then((res) => {
+        if (res?.scan) {
+          setBdixScan(res.scan);
+          if (res.scan.running || res.scan.results?.length > 0) setShowBdixResults(true);
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  const handleStartBdixScan = async () => {
+    setShowBdixResults(true);
+    try {
+      const res = await apiPost("/api/servers/bdix-scan", { autoSync: true });
+      if (res?.status) setBdixScan(res.status);
+      onNotify("Scanning BDIX servers open on your Wi-Fi...");
+    } catch (err) {
+      onNotify("BDIX scan failed: " + err.message);
+    }
+  };
+
+  useEffect(() => {
+    if (autoStartBdixScan) {
+      onAutoStartHandled?.();
+      handleStartBdixScan();
+    }
+  }, [autoStartBdixScan]);
+
+  // Poll BDIX scan status smoothly while running (and auto-refresh servers list when done!)
+  useEffect(() => {
+    if (!bdixScan?.running) {
+      if (prevBdixRunningRef.current) {
+        loadHealth(true);
+        onServersChanged?.();
+      }
+      prevBdixRunningRef.current = false;
+      return;
+    }
+    prevBdixRunningRef.current = true;
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiGet("/api/servers/bdix-scan/status");
+        if (res?.scan) setBdixScan(res.scan);
+      } catch {}
+    }, 650);
+    return () => clearInterval(timer);
+  }, [bdixScan?.running]);
 
   // Automatically refresh server item counts & statuses as soon as any sync finishes!
   useEffect(() => {
@@ -373,6 +427,107 @@ export default function SyncDrawer({
           </div>
         </div>
 
+        {/* Built-in Wi-Fi BDIX Server Scanner (https://bdix.link/test/server) */}
+        <div className="drawer-card bdix-scanner-card">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, fontWeight: 700, fontSize: 14 }}>
+                <Wifi size={15} color="var(--sky)" />
+                <span>Wi-Fi BDIX Server Scanner</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                Tests open FTP servers on your current Wi-Fi via bdix.link &amp; auto-syncs only open servers
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-sky btn-sm"
+            style={{ width: "100%", height: 38, marginTop: 11, justifyContent: "center" }}
+            disabled={Boolean(bdixScan?.running)}
+            onClick={handleStartBdixScan}
+          >
+            {bdixScan?.running ? (
+              <>
+                <RefreshCw size={14} className="spin" />
+                Testing {bdixScan.tested || 0}/{bdixScan.total || "..."} Servers ({bdixScan.openCount || 0} Open)
+              </>
+            ) : (
+              <>
+                <Sparkles size={14} /> Run Wi-Fi BDIX Server Test &amp; Auto-Sync
+              </>
+            )}
+          </button>
+
+          {bdixScan && (bdixScan.running || bdixScan.total > 0) && (
+            <div className="bdix-scan-progress-box">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, gap: 8 }}>
+                <span style={{ color: bdixScan.phase === "error" ? "#fca5a5" : "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {bdixScan.message}
+                </span>
+                <strong style={{ color: "var(--sky)", flexShrink: 0 }}>{bdixScan.percent || 0}%</strong>
+              </div>
+              <div className="sync-bar-wrap" style={{ width: "100%", height: 5, marginTop: 6 }}>
+                <div className="sync-bar-fill" style={{ width: `${bdixScan.percent || 0}%` }} />
+              </div>
+
+              {bdixScan.results?.length > 0 && (
+                <>
+                  <div className="bdix-result-toolbar">
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        type="button"
+                        className={`bdix-filter-pill ${bdixFilter === "open" ? "active" : ""}`}
+                        onClick={() => setBdixFilter("open")}
+                      >
+                        Open ({bdixScan.openCount || 0})
+                      </button>
+                      <button
+                        type="button"
+                        className={`bdix-filter-pill ${bdixFilter === "all" ? "active" : ""}`}
+                        onClick={() => setBdixFilter("all")}
+                      >
+                        All ({bdixScan.results.length})
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="bdix-filter-pill"
+                      onClick={() => setShowBdixResults((v) => !v)}
+                    >
+                      {showBdixResults ? "Hide List" : "Show List"}
+                    </button>
+                  </div>
+
+                  {showBdixResults && (
+                    <div className="bdix-results-list">
+                      {(bdixFilter === "open"
+                        ? bdixScan.results.filter((r) => r.open)
+                        : bdixScan.results
+                      ).map((r) => (
+                        <div className={`bdix-result-row ${r.syncable ? "synced" : r.open ? "open" : "closed"}`} key={`${r.url}-${r.title}`}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="bdix-row-title">{r.title}</div>
+                            <div className="bdix-row-url">{r.url}</div>
+                          </div>
+                          <span className={`bdix-row-pill ${r.syncable ? "synced" : r.open ? "open" : "closed"}`}>
+                            {r.syncable
+                              ? `Synced · ${r.latencyMs ?? 0}ms`
+                              : r.open
+                                ? (r.status === "web-only" ? "Web Portal" : `Open · ${r.latencyMs ?? 0}ms`)
+                                : "Closed"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Dynamic FTP Servers Manager */}
         <div className="drawer-card srv-manager-card">
           <div className="srv-section-head">
@@ -631,9 +786,9 @@ export default function SyncDrawer({
                         </span>
                       )}
                       {!s.enabled ? (
-                        <span className="srv-reason-text">Files hidden from library</span>
-                      ) : !s.online && s.reason ? (
-                        <span className="srv-reason-text">{s.reason}</span>
+                        <span className="srv-reason-text">Disabled — files hidden</span>
+                      ) : !s.online ? (
+                        <span className="srv-reason-text">Offline — content hidden{s.reason ? ` (${s.reason})` : ""}</span>
                       ) : null}
                     </div>
 

@@ -68,6 +68,7 @@ export default function App() {
   const [activeDetail, setActiveDetail] = useState(null); // { id, initialPlay }
   const [playerSession, setPlayerSession] = useState(null);
   const [showSyncDrawer, setShowSyncDrawer] = useState(false);
+  const [autoStartBdixScan, setAutoStartBdixScan] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
 
@@ -127,30 +128,35 @@ export default function App() {
     loadCategories();
 
     const es = new EventSource("/api/sync/events");
-    const handlePayload = (ev, isDone = false) => {
+    const handlePayload = (ev, isDone = false, isHealth = false) => {
       try {
         const d = JSON.parse(ev.data);
         if (d.sync) setSync(d.sync);
         if (d.stats) {
           setStats(d.stats);
-          // Refresh Home smoothly as initial titles stream in during cold-start sync
+          const prevTot = lastReloadTotalRef.current;
+          const nextTot = d.stats.total ?? 0;
+          // Refresh Home/Browse immediately on health transitions (e.g. offline -> 0 or back online),
+          // on cold-start progress, or when sync completes!
           if (
-            d.stats.total > 0 &&
-            (lastReloadTotalRef.current === 0 ||
-              d.stats.total - lastReloadTotalRef.current >= 500 ||
-              (isDone && d.sync?.newlyAddedCount > 0))
+            isHealth ||
+            isDone ||
+            (nextTot === 0 && prevTot > 0) ||
+            (nextTot > 0 && (prevTot === 0 || Math.abs(nextTot - prevTot) >= 500))
           ) {
-            lastReloadTotalRef.current = d.stats.total;
+            lastReloadTotalRef.current = nextTot;
             loadHome();
             loadCategories();
+            setCatalogTick((t) => t + 1);
           }
         }
       } catch { }
     };
 
-    es.addEventListener("status", (e) => handlePayload(e, false));
-    es.addEventListener("progress", (e) => handlePayload(e, false));
-    es.addEventListener("done", (e) => handlePayload(e, true));
+    es.addEventListener("status", (e) => handlePayload(e, false, false));
+    es.addEventListener("progress", (e) => handlePayload(e, false, false));
+    es.addEventListener("done", (e) => handlePayload(e, true, false));
+    es.addEventListener("health", (e) => handlePayload(e, false, true));
 
     return () => es.close();
   }, [loadHome, loadCategories, notify]);
@@ -582,21 +588,9 @@ export default function App() {
     setCatalogTick((t) => t + 1);
   }, [loadHome, loadCategories]);
 
-  const handleSelectCard = useCallback((item, progress = null, autoPlay = false) => {
-    // If clicked from Continue Watching and we know the exact file URL, resume straight into Player!
-    if (progress?.file_url) {
-      setPlayerSession({
-        item,
-        file: {
-          url: progress.file_url,
-          name: progress.file_name || item.title,
-          label: progress.episode_label,
-        },
-        seasonName: progress.season_name,
-        startTime: progress.completed ? 0 : progress.position,
-      });
-      return;
-    }
+  const handleSelectCard = useCallback((item, _progress = null, autoPlay = false) => {
+    // Always open the Details view (including from Continue Watching) so the user can pick
+    // their previously watched file/episode (resuming from last position) or any other edition.
     setActiveDetail({ id: item.id, initialPlay: autoPlay });
   }, []);
 
@@ -799,16 +793,28 @@ export default function App() {
                 <div className="empty-state">
                   <Clapperboard size={44} color="var(--accent)" style={{ marginBottom: 14 }} />
                   <h2 style={{ fontFamily: "Outfit, sans-serif", fontSize: 24, marginBottom: 8 }}>
-                    {sync.running ? "Building your CineVault library..." : "Ready to Sync All Servers"}
+                    {sync.running ? "Syncing open servers on your Wi-Fi..." : "No Active Online Servers"}
                   </h2>
-                  <p style={{ maxWidth: 460, margin: "0 auto 20px", lineHeight: 1.6 }}>
-                    Indexing movies, TV series, K-dramas, and anime directly across all connected
-                    media servers. Titles will appear here automatically in a few seconds.
+                  <p style={{ maxWidth: 490, margin: "0 auto 20px", lineHeight: 1.6 }}>
+                    Offline servers are automatically hidden so you only see playable movies &amp;
+                    series. Run the <strong>Wi-Fi BDIX Server Test</strong> (powered by bdix.link)
+                    to discover and auto-sync every open FTP server available on your current Wi-Fi.
                   </p>
                   {!sync.running && (
-                    <button className="btn btn-primary" onClick={() => handleTriggerSync("full")}>
-                      <RefreshCw size={16} /> Sync Library Now
-                    </button>
+                    <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => {
+                          setAutoStartBdixScan(true);
+                          setShowSyncDrawer(true);
+                        }}
+                      >
+                        <Sparkles size={16} /> Scan My Wi-Fi (BDIX Test)
+                      </button>
+                      <button className="btn btn-glass" onClick={() => setShowSyncDrawer(true)}>
+                        <Server size={16} /> Manage Servers
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -1126,7 +1132,7 @@ export default function App() {
               {historyList.length > 0 && (
                 <CarouselRow
                   title={`Recently Watched (${historyList.length})`}
-                  subtitle="Click any title to resume, or × to remove from history"
+                  subtitle="Click any title to open details & resume, or × to remove from history"
                   items={historyList}
                   isContinueWatching
                   onSelect={handleSelectCard}
@@ -1258,7 +1264,12 @@ export default function App() {
         <SyncDrawer
           sync={sync}
           stats={stats}
-          onClose={() => setShowSyncDrawer(false)}
+          autoStartBdixScan={autoStartBdixScan}
+          onAutoStartHandled={() => setAutoStartBdixScan(false)}
+          onClose={() => {
+            setShowSyncDrawer(false);
+            setAutoStartBdixScan(false);
+          }}
           onTriggerSync={handleTriggerSync}
           onServersChanged={handleServersChanged}
           onNotify={notify}

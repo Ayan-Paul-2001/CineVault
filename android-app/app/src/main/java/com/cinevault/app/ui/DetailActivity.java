@@ -118,6 +118,24 @@ public final class DetailActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        // Refresh watch progress whenever returning from PlayerActivity so Resume timestamps stay live
+        if (bundle != null && itemId > 0) {
+            app.ioExecutor.execute(() -> {
+                List<Models.WatchHistoryRecord> freshHistory = app.repository.db.getItemWatchHistory(itemId);
+                app.mainHandler.post(() -> {
+                    if (isFinishing() || bundle == null) return;
+                    Models.MediaDetailBundle cur = bundle;
+                    bundle = new Models.MediaDetailBundle(
+                            cur.item, cur.files, cur.seasons, cur.editions, freshHistory, cur.meta);
+                    renderBundle();
+                });
+            });
+        }
+    }
+
+    @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         applyResponsiveFormFactorUi();
@@ -175,6 +193,38 @@ public final class DetailActivity extends AppCompatActivity {
                 qualityFilter = "ALL";
                 selectedSeriesEdition = "unified";
                 selectedSeasonIdx = 0;
+                // Auto-select the season (and server edition if needed) containing the last-watched episode
+                if (!res.history.isEmpty() && res.history.get(0).fileUrl != null) {
+                    String lastUrl = res.history.get(0).fileUrl;
+                    boolean matched = false;
+                    for (int si = 0; si < res.seasons.size(); si++) {
+                        for (Models.MediaFileEntry ep : res.seasons.get(si).episodes) {
+                            if (lastUrl.equals(ep.url)) {
+                                selectedSeriesEdition = "unified";
+                                selectedSeasonIdx = si;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (matched) break;
+                    }
+                    if (!matched) {
+                        for (Models.MediaEdition ed : res.editions) {
+                            for (int si = 0; si < ed.seasons.size(); si++) {
+                                for (Models.MediaFileEntry ep : ed.seasons.get(si).episodes) {
+                                    if (lastUrl.equals(ep.url)) {
+                                        selectedSeriesEdition = String.valueOf(ed.id);
+                                        selectedSeasonIdx = si;
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                                if (matched) break;
+                            }
+                            if (matched) break;
+                        }
+                    }
+                }
                 loadingBox.setVisibility(View.GONE);
                 scrollView.setVisibility(View.VISIBLE);
                 renderBundle();
@@ -215,6 +265,19 @@ public final class DetailActivity extends AppCompatActivity {
                                 d.item.quality != null ? d.item.quality : "HD",
                                 ServerConfig.serverDisplayName(s.source, s.url),
                                 Collections.emptyList(), hist.completed ? 0 : hist.position);
+                    }
+                }
+            }
+            for (Models.MediaEdition ed : d.editions) {
+                for (Models.SeasonEntry s : ed.seasons) {
+                    for (int i = 0; i < s.episodes.size(); i++) {
+                        if (s.episodes.get(i).url.equals(hist.fileUrl)) {
+                            return new Models.PlaybackSession(d.item.id, d.item.title, s.episodes.get(i),
+                                    s.subtitles, s.name, s.episodes, i,
+                                    ed.quality != null ? ed.quality : (d.item.quality != null ? d.item.quality : "HD"),
+                                    ed.serverLabel != null ? ed.serverLabel : ServerConfig.serverDisplayName(s.source, s.url),
+                                    Collections.emptyList(), hist.completed ? 0 : hist.position);
+                        }
                     }
                 }
             }
@@ -383,7 +446,8 @@ public final class DetailActivity extends AppCompatActivity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(UiHelper.dp(this, 12), UiHelper.dp(this, 12), UiHelper.dp(this, 12), UiHelper.dp(this, 12));
-        card.setBackground(UiHelper.outlineBoxDrawable(isBest ? 0x88F59E0B : 0x22FFFFFF, 0xFF131826));
+        boolean hasResume = hist != null && !hist.completed && hist.position > 5;
+        card.setBackground(UiHelper.outlineBoxDrawable(hasResume ? 0x9938BDF8 : (isBest ? 0x88F59E0B : 0x22FFFFFF), 0xFF131826));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = UiHelper.dp(this, 10);
@@ -422,7 +486,7 @@ public final class DetailActivity extends AppCompatActivity {
         actions.setPadding(0, UiHelper.dp(this, 10), 0, 0);
 
         MaterialButton playBtn = new MaterialButton(this);
-        playBtn.setText("Play");
+        playBtn.setText(hasResume ? "Resume (" + Models.formatDurationSec(hist.position) + ")" : "Play");
         playBtn.setAllCaps(false);
         playBtn.setBackgroundColor(0xFFE50914);
         playBtn.setTextColor(Color.WHITE);
@@ -517,12 +581,13 @@ public final class DetailActivity extends AppCompatActivity {
             final int epIdx = i;
             Models.MediaFileEntry ep = active.episodes.get(i);
             Models.WatchHistoryRecord hist = histMap.get(ep.url);
+            boolean hasResume = hist != null && !hist.completed && hist.position > 5;
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(UiHelper.dp(this, 12), UiHelper.dp(this, 10), UiHelper.dp(this, 10), UiHelper.dp(this, 10));
-            row.setBackground(UiHelper.outlineBoxDrawable(0x1FFFFFFF, 0xFF131826));
+            row.setBackground(UiHelper.outlineBoxDrawable(hasResume ? 0x9938BDF8 : 0x1FFFFFFF, 0xFF131826));
             LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             rlp.bottomMargin = UiHelper.dp(this, 8);
@@ -573,7 +638,7 @@ public final class DetailActivity extends AppCompatActivity {
             row.addView(epDlBtn);
 
             MaterialButton pbtn = new MaterialButton(this);
-            pbtn.setText("Play");
+            pbtn.setText(hasResume ? "Resume" : "Play");
             pbtn.setAllCaps(false);
             pbtn.setBackgroundColor(0xFFE50914);
             pbtn.setTextColor(Color.WHITE);

@@ -73,6 +73,24 @@ function findPrimaryPlayable(d) {
         };
       }
     }
+    for (const ed of editions) {
+      for (const s of ed.seasons || []) {
+        const idx = (s.episodes || []).findIndex((e) => e.url === hist.file_url);
+        if (idx >= 0) {
+          return {
+            item: d.item,
+            file: s.episodes[idx],
+            externalSubtitles: s.subtitles || [],
+            seasonName: s.name,
+            playlist: s.episodes,
+            playlistIndex: idx,
+            qualityLabel: ed.quality || d.item.quality || "HD",
+            serverLabel: ed.serverLabel || seasonServerLabel(s.source),
+            startTime: hist.completed ? 0 : hist.position,
+          };
+        }
+      }
+    }
     const qMatch = qualityOptions.find((o) => o.file.url === hist.file_url);
     if (qMatch) {
       return {
@@ -150,8 +168,31 @@ export default function DetailModal({
       const res = await apiGet(`/api/item/${itemId}${refresh ? "?refresh=1" : ""}`);
       setData(res);
       setQualityFilter("ALL");
-      setSelectedSeriesEdition("unified");
-      setSelectedSeason(0);
+      // Auto-select the season (and server edition if needed) containing the last-watched episode
+      let nextEdition = "unified";
+      let nextSeason = 0;
+      const lastUrl = res?.history?.[0]?.file_url;
+      if (lastUrl) {
+        const uIdx = (res.seasons || []).findIndex((s) =>
+          (s.episodes || []).some((ep) => ep.url === lastUrl)
+        );
+        if (uIdx >= 0) {
+          nextSeason = uIdx;
+        } else {
+          for (const ed of res.editions || []) {
+            const eIdx = (ed.seasons || []).findIndex((s) =>
+              (s.episodes || []).some((ep) => ep.url === lastUrl)
+            );
+            if (eIdx >= 0) {
+              nextEdition = String(ed.id);
+              nextSeason = eIdx;
+              break;
+            }
+          }
+        }
+      }
+      setSelectedSeriesEdition(nextEdition);
+      setSelectedSeason(nextSeason);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -457,10 +498,12 @@ export default function DetailModal({
                       ed.files.map((f, idx) => {
                         const fq = f.quality || ed.quality;
                         const hist = historyMap.get(f.url);
+                        const hasResume = Boolean(hist && !hist.completed && hist.position > 5);
                         const isOffline = f.online === false;
                         return (
                           <div
                             className={`file-row quality-row ${ed.isPrimary && idx === 0 ? "is-best" : ""}`}
+                            style={hasResume ? { borderColor: "rgba(56, 189, 248, 0.55)" } : undefined}
                             key={`${ed.id}-${f.url}`}
                           >
                             <div
@@ -556,7 +599,8 @@ export default function DetailModal({
                                   })
                                 }
                               >
-                                <Play size={14} fill="currentColor" /> Play
+                                <Play size={14} fill="currentColor" />{" "}
+                                {hasResume ? `Resume (${formatDuration(hist.position)})` : "Play"}
                               </button>
                               <button
                                 className="icon-btn"
@@ -673,9 +717,14 @@ export default function DetailModal({
                       ) : (
                         activeSeason.episodes.map((ep, idx) => {
                           const hist = historyMap.get(ep.url);
+                          const hasResume = Boolean(hist && !hist.completed && hist.position > 5);
                           const epServer = seasonServerLabel(activeSeason.source);
                           return (
-                            <div className="file-row" key={ep.url}>
+                            <div
+                              className="file-row"
+                              style={hasResume ? { borderColor: "rgba(56, 189, 248, 0.55)" } : undefined}
+                              key={ep.url}
+                            >
                               <div
                                 className="file-row-main"
                                 onClick={() =>

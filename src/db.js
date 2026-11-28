@@ -751,6 +751,25 @@ export function getLibraryStats(force = false, maxAgeMs = 300000) {
   }
 
   const enabledSets = getEnabledServerSets();
+  if (enabledSets.origins.size === 0 && enabledSets.sources.size === 0) {
+    const emptyCats = {};
+    for (const catId of CATEGORY_MAP.keys()) emptyCats[catId] = 0;
+    cachedStats = {
+      total: 0,
+      totalRaw: 0,
+      duplicatesMerged: 0,
+      movies: 0,
+      series: 0,
+      bySource: {},
+      byCategory: emptyCats,
+      years: [],
+      languages: [],
+      lastSync: getSyncState("last_sync_at"),
+    };
+    statsBuiltAt = Date.now();
+    return cachedStats;
+  }
+
   let totalRaw = 0;
   for (const r of db.prepare("SELECT source, origin, COUNT(*) AS c FROM media_items GROUP BY source, origin").all()) {
     if (isMediaRowFromEnabledServer(r, enabledSets)) totalRaw += r.c;
@@ -917,6 +936,33 @@ export function queryItems({
   deviceId = "default",
   skipCount = false,
 } = {}) {
+  const safeLimit0 = Math.min(120, Math.max(1, parseInt(limit, 10) || 36));
+  const safePage0 = Math.max(1, parseInt(page, 10) || 1);
+  const enabledSets = getEnabledServerSets();
+  if (enabledSets.origins.size === 0 && enabledSets.sources.size === 0) {
+    return {
+      items: [],
+      total: 0,
+      page: safePage0,
+      limit: safeLimit0,
+      totalPages: 0,
+      ...(q && String(q).trim()
+        ? {
+            facets: {
+              totalUnfiltered: 0,
+              capped: false,
+              byCategory: {},
+              years: [],
+              yearCounts: {},
+              qualities: {},
+              audios: { dual: 0, multi: 0, "hindi-dubbed": 0 },
+              languages: [],
+              sources: {},
+            },
+          }
+        : {}),
+    };
+  }
   const safeDevice = normalizeDeviceId(deviceId);
   const where = [];
   const params = [];
@@ -1131,15 +1177,17 @@ export function toggleWatchlist(mediaId, deviceId = "default") {
 
 export function getWatchlist(deviceId = "default") {
   const safeDevice = normalizeDeviceId(deviceId);
+  const enabledSets = getEnabledServerSets();
+  if (enabledSets.origins.size === 0 && enabledSets.sources.size === 0) return [];
   return db.prepare(`
-    SELECT m.id, m.url, m.category, m.media_type, m.sub_group, m.title, m.raw_name,
+    SELECT m.id, m.url, m.origin, m.category, m.media_type, m.sub_group, m.title, m.raw_name,
            m.year, m.quality, m.audio_tags, m.source_tag, m.language_tag,
            m.imdb_rank, m.modified_at, m.poster_url, m.source, 1 AS in_watchlist, w.added_at
     FROM watchlist w
     JOIN media_items m ON m.id = w.media_id
     WHERE w.device_id = ? AND m.is_primary = 1
     ORDER BY w.added_at DESC
-  `).all(safeDevice);
+  `).all(safeDevice).filter((r) => isMediaRowFromEnabledServer(r, enabledSets));
 }
 
 export function removeFromWatchlist(mediaId, deviceId = "default") {
@@ -1279,6 +1327,11 @@ export function getRecentlyWatchedSeriesIds(limit = 12) {
 // DYNAMIC FTP / DIRECTORY SERVER REGISTRY (Add / Toggle / Remove / Reset)
 // =========================================================================
 
+const srvCols = new Set(db.prepare("PRAGMA table_info(servers)").all().map((c) => c.name));
+if (!srvCols.has("is_online")) {
+  db.exec("ALTER TABLE servers ADD COLUMN is_online INTEGER NOT NULL DEFAULT 0");
+}
+
 function rowToServerObj(r) {
   let folders = [];
   if (r.folders_json) {
@@ -1296,6 +1349,7 @@ function rowToServerObj(r) {
     rootHref: r.root_href || "/",
     pingHref: r.ping_href || null,
     enabled: Boolean(r.enabled),
+    online: Boolean(r.is_online),
     isBuiltin: Boolean(r.is_builtin),
     optional: Boolean(r.optional),
     pingTimeoutMs: r.ping_timeout_ms || 5500,
@@ -1442,15 +1496,16 @@ export function addOrUpdateCustomServer({ id = null, name, url, adapter = "direc
   db.prepare(`
     INSERT INTO servers (
       id, source, name, adapter, origin, root_href, ping_href,
-      enabled, is_builtin, optional, ping_timeout_ms, folders_json, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, 0, 0, 5500, ?, ?)
+      enabled, is_online, is_builtin, optional, ping_timeout_ms, folders_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, 1, 0, 0, 5500, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       adapter = excluded.adapter,
       origin = excluded.origin,
       root_href = excluded.root_href,
       folders_json = CASE WHEN excluded.adapter = 'directory' THEN excluded.folders_json ELSE servers.folders_json END,
-      enabled = 1
+      enabled = 1,
+      is_online = 1
   `).run(serverId, sourceKey, cleanName, safeAdapter, origin, rootHref, JSON.stringify(cleanFolders), Date.now());
 
   syncDynamicServerRegistry();
@@ -1478,7 +1533,8 @@ export function updateServerFolders(id, folders = []) {
 }
 
 function getEnabledServerSets() {
-  const rows = db.prepare("SELECT source, origin FROM servers WHERE enabled = 1").all();
+  // ONLY enabled AND currently online servers expose content in the catalog (offline servers are automatically hidden!)
+  const rows = db.prepare("SELECT source, origin FROM servers WHERE enabled = 1 AND is_online = 1").all();
   const origins = new Set();
   const sources = new Set();
   for (const s of rows) {
@@ -1486,6 +1542,63 @@ function getEnabledServerSets() {
     if (s.source) sources.add(s.source);
   }
   return { origins, sources };
+}
+
+function hasVisibilityMismatch(enabledSets = null) {
+  const sets = enabledSets || getEnabledServerSets();
+  const visibleGroups = db.prepare("SELECT DISTINCT source, origin FROM media_items WHERE is_primary = 1").all();
+  if (sets.origins.size === 0 && sets.sources.size === 0) {
+    return visibleGroups.length > 0;
+  }
+  for (const g of visibleGroups) {
+    if (!isMediaRowFromEnabledServer(g, sets)) return true;
+  }
+  // Also check if an online server has indexed media rows while ZERO primary titles are currently visible
+  if (visibleGroups.length === 0) {
+    const allGroups = db.prepare("SELECT DISTINCT source, origin FROM media_items").all();
+    for (const g of allGroups) {
+      if (isMediaRowFromEnabledServer(g, sets)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Persist live online/offline reachability for servers.
+ * Whenever ANY server flips online <-> offline (OR stale preloaded visibility doesn't match online state),
+ * immediately re-runs deduplication so offline servers' content disappears and online servers reappear!
+ */
+export function updateServersOnlineStatus(onlineById = {}) {
+  const existing = db.prepare("SELECT id, enabled, is_online FROM servers").all();
+  const changes = [];
+  for (const row of existing) {
+    if (!Object.prototype.hasOwnProperty.call(onlineById, row.id)) continue;
+    const nextOnline = row.enabled && onlineById[row.id] ? 1 : 0;
+    if ((row.is_online ? 1 : 0) !== nextOnline) {
+      changes.push([nextOnline, row.id]);
+    }
+  }
+  if (changes.length > 0) {
+    const stmt = db.prepare("UPDATE servers SET is_online = ? WHERE id = ?");
+    db.exec("BEGIN");
+    try {
+      for (const [val, id] of changes) stmt.run(val, id);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+  const mismatch = changes.length === 0 && hasVisibilityMismatch();
+  if (changes.length === 0 && !mismatch) {
+    return { changed: false, updatedCount: 0 };
+  }
+  runDeduplication();
+  return { changed: true, updatedCount: changes.length };
+}
+
+export function getActiveOnlineServers() {
+  return getAllServers().filter((s) => s.enabled && s.online);
 }
 
 export function isMediaRowFromEnabledServer(row, sets = null) {
@@ -1587,7 +1700,7 @@ export function resetDefaultServers() {
 }
 
 export function getServerFilterOptions() {
-  const enabled = getEnabledServers();
+  const active = getActiveOnlineServers();
   const stats = getLibraryStats();
   const bySource = new Map();
   const builtinLabelMap = {
@@ -1596,7 +1709,7 @@ export function getServerFilterOptions() {
     circleftp: "CircleFTP",
     discoveryftp: "DiscoveryFTP",
   };
-  for (const s of enabled) {
+  for (const s of active) {
     if (!bySource.has(s.source)) {
       bySource.set(s.source, {
         value: s.source,

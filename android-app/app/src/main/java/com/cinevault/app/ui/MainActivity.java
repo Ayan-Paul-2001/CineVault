@@ -173,12 +173,49 @@ public final class MainActivity extends AppCompatActivity {
     private TextView srvListHeaderTitle, srvListStatusStrip;
     private ProgressBar srvSyncBar;
     private MaterialButton btnSrvSyncQuick, btnSrvSyncFull, btnSrvPingAll, btnSrvAddServer, btnSrvResetDefaults;
+    private MaterialButton btnSrvBdixScan;
+    private TextView srvBdixStatus;
+    private ProgressBar srvBdixProgress;
+    private LinearLayout srvBdixResults;
     private TextView srvLastSyncText, srvAppVersion, srvUpdateStatus, srvUpdateNotes;
     private MaterialSwitch switchAutoSync;
     private Spinner spinAutoSyncInterval;
     private LinearLayout srvHealthList;
     private MaterialButton btnSrvCheckUpdates, btnSrvDownloadUpdate;
     private volatile List<Models.ServerFilterOption> cachedServerFilterOptions = Collections.emptyList();
+    private volatile long lastHealthReprobeMs = 0L;
+    private android.net.ConnectivityManager connectivityManager;
+    private android.net.ConnectivityManager.NetworkCallback networkCallback;
+    private final Runnable networkReprobeRunnable = () -> app.ioExecutor.execute(() -> {
+        lastHealthReprobeMs = System.currentTimeMillis();
+        boolean netOk = isDeviceNetworkAvailable();
+        if (!netOk) {
+            app.repository.markAllServersOffline();
+        } else {
+            app.repository.checkAllServersHealth();
+        }
+        cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+        uiHandler.post(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            loadHome(false);
+            if (currentTab == 1 || currentTab == 2 || currentTab == 4) loadBrowse();
+            else if (currentTab == 3) loadMyList();
+            else if (currentTab == 5) loadServersTab(false);
+        });
+    });
+    private final com.cinevault.app.data.BdixScannerService.ScanListener bdixScanListener = p -> uiHandler.post(() -> {
+        if (isFinishing() || isDestroyed()) return;
+        renderBdixScanProgress(p);
+        if (!p.running && "done".equals(p.phase)) {
+            app.ioExecutor.execute(() -> {
+                cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                uiHandler.post(() -> {
+                    loadHome(false);
+                    if (currentTab == 5) loadServersTab(false);
+                });
+            });
+        }
+    });
 
     // YouTube Premium-Style In-App Minimizable Mini-Player Drawer Bar widgets
     private View miniPlayerBar, miniPlayerContent;
@@ -293,6 +330,8 @@ public final class MainActivity extends AppCompatActivity {
         setupListeners();
         setupBackNavigation();
         app.repository.addSyncListener(syncListener);
+        app.repository.bdixScanner.addListener(bdixScanListener);
+        registerNetworkMonitor();
 
         bootstrapCatalogAndHome();
         handleOpenTabIntent(getIntent());
@@ -371,12 +410,21 @@ public final class MainActivity extends AppCompatActivity {
             app.playbackManager.addListener(miniPlayerListener);
             updateMiniPlayerUi();
         }
-        if (currentTab == 0) loadHome(false);
-        else if (currentTab == 3) {
-            loadMyList();
-            startDownloadsPolling();
+        // Never flash stale preloaded offline tiles before the initial reachability check completes!
+        if (app.repository.hasCheckedHealthOnce()) {
+            if (currentTab == 0) loadHome(false);
+            else if (currentTab == 3) {
+                loadMyList();
+                startDownloadsPolling();
+            }
+            else if (currentTab == 5) loadServersTab(false);
+
+            // Re-verify reachability when returning from background (e.g. switched Wi-Fi <-> Mobile Data!)
+            if (System.currentTimeMillis() - lastHealthReprobeMs >= 20000L) {
+                uiHandler.removeCallbacks(networkReprobeRunnable);
+                uiHandler.postDelayed(networkReprobeRunnable, 250L);
+            }
         }
-        else if (currentTab == 5) loadServersTab(false);
         checkForUpdatesBackground(true);
     }
 
@@ -398,6 +446,8 @@ public final class MainActivity extends AppCompatActivity {
             v142FeaturePopupAnimator = null;
         }
         app.repository.removeSyncListener(syncListener);
+        app.repository.bdixScanner.removeListener(bdixScanListener);
+        unregisterNetworkMonitor();
         if (app.playbackManager != null) {
             app.playbackManager.removeListener(miniPlayerListener);
             app.playbackManager.detachPlayerView(miniPlayerVideo);
@@ -534,6 +584,10 @@ public final class MainActivity extends AppCompatActivity {
         spinAutoSyncInterval = findViewById(R.id.spin_auto_sync_interval);
         srvListHeaderTitle = findViewById(R.id.srv_list_header_title);
         srvListStatusStrip = findViewById(R.id.srv_list_status_strip);
+        btnSrvBdixScan = findViewById(R.id.btn_srv_bdix_scan);
+        srvBdixStatus = findViewById(R.id.srv_bdix_status);
+        srvBdixProgress = findViewById(R.id.srv_bdix_progress);
+        srvBdixResults = findViewById(R.id.srv_bdix_results);
         btnSrvAddServer = findViewById(R.id.btn_srv_add_server);
         btnSrvResetDefaults = findViewById(R.id.btn_srv_reset_defaults);
         btnSrvPingAll = findViewById(R.id.btn_srv_ping_all);
@@ -562,7 +616,9 @@ public final class MainActivity extends AppCompatActivity {
         UiHelper.applyTvFocusEffect(btnHeroPlay, 1.05f);
         UiHelper.applyTvFocusEffect(btnHeroDetails, 1.05f);
         UiHelper.applyTvFocusEffect(btnHeroWatchlist, 1.06f);
+        UiHelper.applyTvFocusEffect(findViewById(R.id.btn_home_bdix_scan), 1.05f);
         UiHelper.applyTvFocusEffect(findViewById(R.id.btn_home_sync_now), 1.05f);
+        UiHelper.applyTvFocusEffect(btnSrvBdixScan, 1.03f);
         UiHelper.applyTvFocusEffect(btnPrevPage, 1.05f);
         UiHelper.applyTvFocusEffect(btnNextPage, 1.05f);
         UiHelper.applyTvFocusEffect(btnClearHistory, 1.05f);
@@ -692,7 +748,11 @@ public final class MainActivity extends AppCompatActivity {
 
     private void setupListeners() {
         findViewById(R.id.btn_sync_chip).setOnClickListener(v -> switchTab(5, "", "", "recent"));
-        findViewById(R.id.btn_home_sync_now).setOnClickListener(v -> triggerSync("full"));
+        findViewById(R.id.btn_home_bdix_scan).setOnClickListener(v -> {
+            switchTab(5, "", "", "recent");
+            startWifiBdixScan();
+        });
+        findViewById(R.id.btn_home_sync_now).setOnClickListener(v -> switchTab(5, "", "", "recent"));
         homeSwipe.setColorSchemeColors(0xFFE50914);
         homeSwipe.setOnRefreshListener(() -> triggerSync("quick"));
 
@@ -843,6 +903,9 @@ public final class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        if (btnSrvBdixScan != null) {
+            btnSrvBdixScan.setOnClickListener(v -> startWifiBdixScan());
+        }
         btnSrvAddServer.setOnClickListener(v -> showAddServerDialog());
         btnSrvResetDefaults.setOnClickListener(v -> confirmResetDefaultServers());
         btnSrvPingAll.setOnClickListener(v -> pingAllServersIntoTab());
@@ -962,10 +1025,63 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
+    private boolean isDeviceNetworkAvailable() {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            android.net.Network active = cm.getActiveNetwork();
+            if (active == null) return false;
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+            return caps != null && (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+                    || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR));
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private void registerNetworkMonitor() {
+        try {
+            connectivityManager = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (connectivityManager == null) return;
+            networkCallback = new android.net.ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(android.net.Network network) {
+                    uiHandler.removeCallbacks(networkReprobeRunnable);
+                    uiHandler.postDelayed(networkReprobeRunnable, 1200L);
+                }
+
+                @Override
+                public void onLost(android.net.Network network) {
+                    uiHandler.removeCallbacks(networkReprobeRunnable);
+                    uiHandler.postDelayed(networkReprobeRunnable, 400L);
+                }
+            };
+            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+        } catch (Exception ignored) {}
+    }
+
+    private void unregisterNetworkMonitor() {
+        try {
+            if (connectivityManager != null && networkCallback != null) {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            }
+        } catch (Exception ignored) {}
+        networkCallback = null;
+    }
+
     private void bootstrapCatalogAndHome() {
         app.ioExecutor.execute(() -> {
-            // Clean stray release tags & run deduplication automatically on v1.0.0 -> v1.0.1 upgrade!
+            // Verify live server reachability BEFORE showing Home so OFFLINE servers NEVER display stale preloaded content!
+            lastHealthReprobeMs = System.currentTimeMillis();
+            if (!isDeviceNetworkAvailable()) {
+                app.repository.markAllServersOffline();
+            } else {
+                app.repository.checkAllServersHealth();
+            }
+            // Clean stray release tags & run deduplication automatically on upgrade (respecting live is_online state!)
             app.repository.db.cleanupDirtyTitlesAndDeduplicate();
+            cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
             uiHandler.post(() -> loadHome(true));
         });
     }
@@ -1324,15 +1440,17 @@ public final class MainActivity extends AppCompatActivity {
         app.ioExecutor.execute(() -> {
             Models.HomeFeed feed = app.repository.loadHomeFeed();
             cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
-            boolean iccEnabled = false;
-            boolean hasAnyEnabledServer = false;
+            boolean iccOnline = false;
+            boolean hasAnyOnlineServer = false;
             for (Models.ManagedServer s : app.repository.db.getEnabledServers()) {
-                hasAnyEnabledServer = true;
-                if ("icc".equals(s.adapter)) iccEnabled = true;
+                if (s.online) {
+                    hasAnyOnlineServer = true;
+                    if ("icc".equals(s.adapter)) iccOnline = true;
+                }
             }
             boolean shouldAutoSync = initialBootstrap && feed.stats.total > 0 && app.repository.isAutoSyncDue();
-            final boolean finalIccEnabled = iccEnabled;
-            final boolean finalHasAnyEnabled = hasAnyEnabledServer;
+            final boolean finalIccOnline = iccOnline;
+            final boolean finalHasAnyOnline = hasAnyOnlineServer;
             uiHandler.post(() -> {
                 homeFeed = feed;
                 latestStats = feed.stats;
@@ -1357,11 +1475,11 @@ public final class MainActivity extends AppCompatActivity {
                     }
                 }
 
-                if (initialBootstrap && finalHasAnyEnabled) {
+                if (initialBootstrap && finalHasAnyOnline) {
                     int iccCount = feed.stats.bySource.containsKey("icc") ? feed.stats.bySource.get("icc") : 0;
                     if (feed.stats.total == 0) {
                         triggerSync("full", false);
-                    } else if (finalIccEnabled && iccCount < 500) {
+                    } else if (finalIccOnline && iccCount < 500) {
                         uiHandler.postDelayed(() -> triggerSync("full", true), 2500L);
                     } else if (shouldAutoSync || app.repository.isAutoSyncEnabled()) {
                         uiHandler.postDelayed(() -> triggerSync("quick", true), 3500L);
@@ -1666,6 +1784,9 @@ public final class MainActivity extends AppCompatActivity {
                     merged.add(new Models.ServerHealth(srv.toServerNode(), false, null, "Disabled", srv));
                 } else if (prev != null) {
                     merged.add(new Models.ServerHealth(srv.toServerNode(), prev.online, prev.latencyMs, prev.reason, srv));
+                } else if (app.repository.hasCheckedHealthOnce()) {
+                    merged.add(new Models.ServerHealth(srv.toServerNode(), srv.online, null,
+                            srv.online ? "Online" : "Offline", srv));
                 } else {
                     merged.add(new Models.ServerHealth(srv.toServerNode(), false, null, "Not pinged yet", srv));
                 }
@@ -1705,6 +1826,7 @@ public final class MainActivity extends AppCompatActivity {
                 suppressAutoSyncUiEvents = false;
 
                 renderServersSyncProgress(app.repository.getSyncProgress());
+                renderBdixScanProgress(app.repository.bdixScanner.getProgress());
                 renderServersHealthList(merged);
                 if (availableUpdate != null) renderUpdateCard(availableUpdate);
                 if (triggerPing) pingAllServersIntoTab();
@@ -1754,11 +1876,15 @@ public final class MainActivity extends AppCompatActivity {
         btnSrvPingAll.setEnabled(false);
         btnSrvPingAll.setText("Pinging...");
         app.ioExecutor.execute(() -> {
+            lastHealthReprobeMs = System.currentTimeMillis();
             List<Models.ServerHealth> health = app.repository.checkAllServersHealth();
+            cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
             uiHandler.post(() -> {
                 btnSrvPingAll.setEnabled(true);
                 btnSrvPingAll.setText("Ping All");
                 renderServersHealthList(health);
+                loadServersTab(false);
+                loadHome(false);
             });
         });
     }
@@ -1906,9 +2032,13 @@ public final class MainActivity extends AppCompatActivity {
             List<String> metaParts = new ArrayList<>();
             if (itemCount > 0) metaParts.add(String.format(Locale.US, "%,d indexed", itemCount));
             if (customFolderCount > 0) metaParts.add(customFolderCount + " folder" + (customFolderCount == 1 ? "" : "s"));
-            if (!isEnabled) metaParts.add("Files hidden from library");
-            else if (!h.online && h.reason != null && !h.reason.isEmpty() && !"Not pinged yet".equals(h.reason)) {
-                metaParts.add(h.reason);
+            if (!isEnabled) metaParts.add("Disabled — files hidden");
+            else if (!h.online) {
+                if ("Not pinged yet".equals(h.reason)) {
+                    metaParts.add("Checking reachability...");
+                } else {
+                    metaParts.add("Offline — content hidden" + (h.reason != null && !h.reason.isEmpty() ? " (" + h.reason + ")" : ""));
+                }
             }
             if (!metaParts.isEmpty()) {
                 TextView metaTv = new TextView(this);
@@ -1943,10 +2073,13 @@ public final class MainActivity extends AppCompatActivity {
                     toggle.setEnabled(false);
                     app.ioExecutor.execute(() -> {
                         app.repository.db.setServerEnabled(srv.id, checked);
+                        if (checked) {
+                            app.repository.checkAllServersHealth();
+                        }
                         cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
                         uiHandler.post(() -> {
                             Toast.makeText(MainActivity.this,
-                                    srv.name + (checked ? " enabled — files visible" : " disabled — files hidden"),
+                                    srv.name + (checked ? " enabled — visible if online" : " disabled — files hidden"),
                                     Toast.LENGTH_SHORT).show();
                             loadHome(false);
                             loadServersTab(false);
@@ -1986,6 +2119,104 @@ public final class MainActivity extends AppCompatActivity {
             }
 
             srvHealthList.addView(cardWrap);
+        }
+    }
+
+    private void startWifiBdixScan() {
+        if (app.repository.bdixScanner.isRunning()) {
+            Toast.makeText(this, "Wi-Fi BDIX server scan is already running...", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Scanning open BDIX servers on your Wi-Fi via bdix.link...", Toast.LENGTH_SHORT).show();
+        app.ioExecutor.execute(() -> app.repository.bdixScanner.runWifiBdixScanAndSync(
+                app.repository, true, () -> uiHandler.post(this::refreshVisibleTabAfterSync)));
+    }
+
+    private void renderBdixScanProgress(Models.BdixScanProgress p) {
+        if (p == null || btnSrvBdixScan == null) return;
+        btnSrvBdixScan.setEnabled(!p.running);
+        if (p.running) {
+            btnSrvBdixScan.setText(p.total > 0
+                    ? String.format(Locale.US, "Testing %d/%d Servers (%d Open)...", p.tested, p.total, p.openCount)
+                    : "Fetching BDIX Server List...");
+        } else {
+            btnSrvBdixScan.setText("Run Wi-Fi BDIX Server Test & Auto-Sync");
+        }
+
+        boolean showProgress = p.running || p.total > 0 || !p.message.isEmpty();
+        if (srvBdixStatus != null) {
+            srvBdixStatus.setVisibility(showProgress ? View.VISIBLE : View.GONE);
+            srvBdixStatus.setTextColor("error".equals(p.phase) ? 0xFFFCA5A5 : ("done".equals(p.phase) ? 0xFF22C55E : 0xFF38BDF8));
+            srvBdixStatus.setText(p.message);
+        }
+        if (srvBdixProgress != null) {
+            srvBdixProgress.setVisibility(p.running ? View.VISIBLE : View.GONE);
+            srvBdixProgress.setIndeterminate(p.total == 0);
+            if (p.total > 0) srvBdixProgress.setProgress(p.percent());
+        }
+        if (srvBdixResults != null) {
+            List<Models.BdixSiteResult> openOnly = new ArrayList<>();
+            for (Models.BdixSiteResult r : p.results) {
+                if (r.open) openOnly.add(r);
+            }
+            if (openOnly.isEmpty()) {
+                srvBdixResults.setVisibility(View.GONE);
+                srvBdixResults.removeAllViews();
+            } else {
+                srvBdixResults.setVisibility(View.VISIBLE);
+                srvBdixResults.removeAllViews();
+                int cap = Math.min(openOnly.size(), 16);
+                for (int i = 0; i < cap; i++) {
+                    Models.BdixSiteResult r = openOnly.get(i);
+                    LinearLayout row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                    row.setPadding(UiHelper.dp(this, 9), UiHelper.dp(this, 6), UiHelper.dp(this, 9), UiHelper.dp(this, 6));
+                    row.setBackground(UiHelper.outlineBoxDrawable(r.syncable ? 0x4422C55E : 0x2238BDF8, 0xFF0A0F1D));
+                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                    rlp.bottomMargin = UiHelper.dp(this, 5);
+                    row.setLayoutParams(rlp);
+
+                    LinearLayout col = new LinearLayout(this);
+                    col.setOrientation(LinearLayout.VERTICAL);
+                    col.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+                    TextView tvT = new TextView(this);
+                    tvT.setText(r.title);
+                    tvT.setTextColor(0xFFF3F6FC);
+                    tvT.setTextSize(12f);
+                    tvT.setTypeface(null, android.graphics.Typeface.BOLD);
+                    tvT.setMaxLines(1);
+                    tvT.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    col.addView(tvT);
+
+                    TextView tvU = new TextView(this);
+                    tvU.setText(r.url);
+                    tvU.setTextColor(0xFF64748B);
+                    tvU.setTextSize(10.5f);
+                    tvU.setMaxLines(1);
+                    tvU.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    col.addView(tvU);
+                    row.addView(col);
+
+                    TextView pill = new TextView(this);
+                    String pillText = r.syncable
+                            ? ("Synced · " + (r.latencyMs != null ? r.latencyMs : 0) + "ms")
+                            : ("web-only".equals(r.status) ? "Web Portal" : ("Open · " + (r.latencyMs != null ? r.latencyMs : 0) + "ms"));
+                    pill.setText(pillText);
+                    pill.setTextColor(r.syncable ? 0xFF22C55E : 0xFF38BDF8);
+                    pill.setTextSize(10.5f);
+                    pill.setTypeface(null, android.graphics.Typeface.BOLD);
+                    pill.setPadding(UiHelper.dp(this, 8), UiHelper.dp(this, 3), UiHelper.dp(this, 8), UiHelper.dp(this, 3));
+                    android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+                    bg.setColor(r.syncable ? 0x2222C55E : 0x2238BDF8);
+                    bg.setCornerRadius(UiHelper.dp(this, 99));
+                    pill.setBackground(bg);
+                    row.addView(pill);
+                    srvBdixResults.addView(row);
+                }
+            }
         }
     }
 
@@ -2628,23 +2859,8 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void resumeFromHistory(Models.MediaSummary item) {
-        if (item.historyFileUrl != null && !item.historyFileUrl.isEmpty()
-                && ServerConfig.isAllowedUrl(item.historyFileUrl)) {
-            Models.MediaFileEntry file = new Models.MediaFileEntry(
-                    item.historyFileName != null ? item.historyFileName : item.title,
-                    item.historyFileUrl, "video", "", 0, 0, null, 1,
-                    item.historyEpisodeLabel != null ? item.historyEpisodeLabel : "",
-                    "", item.quality, true);
-            Models.PlaybackSession session = new Models.PlaybackSession(
-                    item.id, item.title, file, Collections.emptyList(), item.historySeasonName,
-                    Collections.emptyList(), 0, item.quality,
-                    ServerConfig.serverDisplayName(item.source, item.origin),
-                    Collections.emptyList(), item.historyCompleted ? 0 : item.historyPosition);
-            Intent i = new Intent(this, PlayerActivity.class);
-            i.putExtra(PlayerActivity.EXTRA_SESSION, session);
-            startActivity(i);
-            return;
-        }
+        // Open Details screen first so the user can choose the previously watched file/episode
+        // (which resumes from its saved position) or pick any other season/edition.
         openDetail(item, false);
     }
 }

@@ -1,4 +1,4 @@
-{
+﻿{
     "appVersion": "1.4.2",
     "appDisplayVersion": "V1.4.2",
     "appVersionCode": 12,
@@ -7,7 +7,7 @@
     "versionCode": 12,
     "apkPackage": "CineVault.apk",
     "apkSizeBytes": 14344522,
-    "sha256": "48a4a1c6a62ab31ed18b292d11ddc4accf09ed3957a9ab4a9fdddf3ebf46efb3",
+    "sha256": "9461d7556fc4af1fa5ede6a727d1b136de95637a5f5657cfec1d895d87dd3fd1",
     "changelog": [
         "Built-In Wi-Fi BDIX Server Scanner (bdix.link/test/server): run a one-tap live Wi-Fi test against ~70 BDIX FTP & media servers directly from your own Wi-Fi network — CineVault automatically detects which servers are open on your ISP, registers & syncs only compatible open FTP servers, and lists them in your Connected Servers panel.",
         "Active Online-Servers-Only Catalog: offline or unreachable servers immediately hide all of their preloaded titles across Home, Browse, Search, Filters, Watchlist, Continue Watching, and Detail mirrors — and automatically reappear when your Wi-Fi reconnects.",
@@ -23,5 +23,5 @@
         "lockMessage": "This version of CineVault is no longer supported. Please update to the latest version to continue using CineVault."
     },
     "otaGatewayOverrides": {},
-    "updatedAt": "2026-11-28T16:29:44.069Z"
+    "updatedAt": "2026-11-28T15:22:00.000Z"
 }

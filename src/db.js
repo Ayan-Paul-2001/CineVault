@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { DATA_DIR, DB_PATH, CATEGORY_MAP } from "./config.js";
+import { DATA_DIR, DB_PATH, CATEGORY_MAP, SERVERS, setDynamicServerRegistry, isSafeServerUrl, normalizeServerInputUrl } from "./config.js";
 import { computeQualityScore, normalizeTitleForMatch } from "./parser.js";
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -78,6 +78,22 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS servers (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    name TEXT NOT NULL,
+    adapter TEXT NOT NULL DEFAULT 'directory',
+    origin TEXT NOT NULL,
+    root_href TEXT NOT NULL DEFAULT '/',
+    ping_href TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    optional INTEGER NOT NULL DEFAULT 0,
+    ping_timeout_ms INTEGER NOT NULL DEFAULT 5500,
+    folders_json TEXT,
+    created_at INTEGER NOT NULL DEFAULT 0
   );
 `);
 
@@ -473,9 +489,10 @@ export function upsertMediaBatch(items, existingUrlMap = null) {
  */
 export function runDeduplication() {
   const t0 = Date.now();
+  const enabledSets = getEnabledServerSets();
   const rows = db.prepare(`
     SELECT id, media_type, clean_title, year, category, quality_score, imdb_rank,
-           modified_at, audio_tags, language_tag, source, season_hint,
+           modified_at, audio_tags, language_tag, source, origin, season_hint,
            is_primary, canonical_id, categories_all
     FROM media_items
     ORDER BY media_type, clean_title, quality_score DESC, modified_at DESC, id ASC
@@ -483,9 +500,14 @@ export function runDeduplication() {
 
   const watchlistIds = new Set(db.prepare("SELECT media_id FROM watchlist").all().map((r) => r.media_id));
 
-  // Partition rows by (media_type + clean_title)
+  // Partition enabled rows by (media_type + clean_title); hide disabled server rows completely
   const byTitle = new Map();
+  const disabledRows = [];
   for (const r of rows) {
+    if (!isMediaRowFromEnabledServer(r, enabledSets)) {
+      disabledRows.push(r);
+      continue;
+    }
     const key = `${r.media_type}::${r.clean_title}`;
     let list = byTitle.get(key);
     if (!list) {
@@ -526,6 +548,14 @@ export function runDeduplication() {
 
   db.exec("BEGIN");
   try {
+    // Demote & unlink all rows from disabled servers so they vanish from grids, search, facets & mirrors
+    for (const dis of disabledRows) {
+      if (dis.is_primary !== 0 || dis.canonical_id !== dis.id) {
+        stmtUpdateDup.run(dis.id, dis.id);
+        writes++;
+      }
+    }
+
     for (const groupRows of byTitle.values()) {
       const clusters = buildCompatibleClusters(groupRows);
 
@@ -703,15 +733,16 @@ export function updateItemMetadata(id, metaObj, fallbackPoster = null) {
 export function getMergedMirrors(item) {
   if (!item) return [];
   const canonId = item.canonical_id || item.id;
+  const enabledSets = getEnabledServerSets();
   return db.prepare(`
     SELECT id, title, raw_name, category, media_type, year, quality, audio_tags,
-           source_tag, language_tag, imdb_rank, url, source, source_id,
+           source_tag, language_tag, imdb_rank, url, origin, source, source_id,
            quality_score, season_hint, is_primary
     FROM media_items
     WHERE canonical_id = ? AND id != ?
     ORDER BY quality_score DESC, season_hint ASC, id ASC
     LIMIT 25
-  `).all(canonId, item.id);
+  `).all(canonId, item.id).filter((r) => isMediaRowFromEnabledServer(r, enabledSets));
 }
 
 export function getLibraryStats(force = false, maxAgeMs = 300000) {
@@ -719,7 +750,11 @@ export function getLibraryStats(force = false, maxAgeMs = 300000) {
     return cachedStats;
   }
 
-  const totalRaw = db.prepare("SELECT COUNT(*) as c FROM media_items").get().c;
+  const enabledSets = getEnabledServerSets();
+  let totalRaw = 0;
+  for (const r of db.prepare("SELECT source, origin, COUNT(*) AS c FROM media_items GROUP BY source, origin").all()) {
+    if (isMediaRowFromEnabledServer(r, enabledSets)) totalRaw += r.c;
+  }
 
   let movies = 0;
   let series = 0;
@@ -1102,7 +1137,7 @@ export function getWatchlist(deviceId = "default") {
            m.imdb_rank, m.modified_at, m.poster_url, m.source, 1 AS in_watchlist, w.added_at
     FROM watchlist w
     JOIN media_items m ON m.id = w.media_id
-    WHERE w.device_id = ?
+    WHERE w.device_id = ? AND m.is_primary = 1
     ORDER BY w.added_at DESC
   `).all(safeDevice);
 }
@@ -1155,11 +1190,13 @@ export function upsertWatchProgress({ mediaId, fileUrl, fileName, seasonName, ep
 
 export function getContinueWatching(limit = 20, deviceId = "default") {
   const safeDevice = normalizeDeviceId(deviceId);
+  const enabledSets = getEnabledServerSets();
   const rows = db.prepare(`
     SELECT h.id AS history_id, h.file_url, h.file_name, h.season_name, h.episode_label,
            h.position, h.duration, h.completed, h.updated_at,
            COALESCE(p.id, m.id) AS id,
            COALESCE(p.url, m.url) AS url,
+           COALESCE(p.origin, m.origin) AS origin,
            COALESCE(p.category, m.category) AS category,
            COALESCE(p.media_type, m.media_type) AS media_type,
            COALESCE(p.title, m.title) AS title,
@@ -1175,7 +1212,7 @@ export function getContinueWatching(limit = 20, deviceId = "default") {
     FROM watch_history h
     JOIN media_items m ON m.id = h.media_id
     LEFT JOIN media_items p ON p.id = m.canonical_id
-    WHERE h.device_id = ? AND h.position > 5
+    WHERE h.device_id = ? AND h.position > 5 AND COALESCE(p.is_primary, m.is_primary) = 1
     ORDER BY h.updated_at DESC
     LIMIT 100
   `).all(safeDevice);
@@ -1183,6 +1220,7 @@ export function getContinueWatching(limit = 20, deviceId = "default") {
   const seen = new Set();
   const deduped = [];
   for (const r of rows) {
+    if (!isMediaRowFromEnabledServer(r, enabledSets)) continue;
     if (seen.has(r.canon_key)) continue;
     seen.add(r.canon_key);
     deduped.push(r);
@@ -1236,3 +1274,338 @@ export function getRecentlyWatchedSeriesIds(limit = 12) {
     LIMIT ?
   `).all(limit).map((r) => r.id);
 }
+
+// =========================================================================
+// DYNAMIC FTP / DIRECTORY SERVER REGISTRY (Add / Toggle / Remove / Reset)
+// =========================================================================
+
+function rowToServerObj(r) {
+  let folders = [];
+  if (r.folders_json) {
+    try {
+      const parsed = JSON.parse(r.folders_json);
+      if (Array.isArray(parsed)) folders = parsed;
+    } catch {}
+  }
+  return {
+    id: r.id,
+    source: r.source,
+    name: r.name,
+    adapter: r.adapter || "directory",
+    origin: r.origin,
+    rootHref: r.root_href || "/",
+    pingHref: r.ping_href || null,
+    enabled: Boolean(r.enabled),
+    isBuiltin: Boolean(r.is_builtin),
+    optional: Boolean(r.optional),
+    pingTimeoutMs: r.ping_timeout_ms || 5500,
+    folders,
+    createdAt: r.created_at || 0,
+  };
+}
+
+function seedBuiltinServersIfNeeded() {
+  const seeded = getSyncState("servers_seeded_v1");
+  const count = db.prepare("SELECT COUNT(*) AS c FROM servers").get().c;
+  if (seeded === "1" || count > 0) {
+    syncDynamicServerRegistry();
+    return;
+  }
+  const now = Date.now();
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO servers (
+      id, source, name, adapter, origin, root_href, ping_href,
+      enabled, is_builtin, optional, ping_timeout_ms, folders_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NULL, ?)
+  `);
+  db.exec("BEGIN");
+  try {
+    for (const s of SERVERS) {
+      stmt.run(
+        s.id,
+        s.source,
+        s.name,
+        s.source,
+        s.origin,
+        s.rootHref || "/",
+        s.pingHref || null,
+        s.optional ? 1 : 0,
+        s.pingTimeoutMs || 5500,
+        now
+      );
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  setSyncState("servers_seeded_v1", "1");
+  syncDynamicServerRegistry();
+}
+
+export function syncDynamicServerRegistry() {
+  const rows = db.prepare("SELECT * FROM servers ORDER BY is_builtin DESC, created_at ASC, id ASC").all();
+  setDynamicServerRegistry(rows.map(rowToServerObj));
+}
+
+export function getAllServers() {
+  const rows = db.prepare("SELECT * FROM servers ORDER BY is_builtin DESC, created_at ASC, id ASC").all();
+  const countByOrigin = new Map();
+  const countBySource = new Map();
+  for (const r of db.prepare("SELECT origin, COUNT(*) AS c FROM media_items GROUP BY origin").all()) {
+    countByOrigin.set(r.origin, r.c);
+  }
+  for (const r of db.prepare("SELECT source, COUNT(*) AS c FROM media_items GROUP BY source").all()) {
+    countBySource.set(r.source, r.c);
+  }
+  return rows.map((r) => {
+    const srv = rowToServerObj(r);
+    const isMultiNode = srv.source === "dhakaflix" || srv.source === "discoveryftp";
+    srv.itemCount = isMultiNode ? (countByOrigin.get(srv.origin) || 0) : (countBySource.get(srv.source) || countByOrigin.get(srv.origin) || 0);
+    return srv;
+  });
+}
+
+export function getEnabledServers() {
+  return getAllServers().filter((s) => s.enabled);
+}
+
+export function getServerById(id) {
+  const r = db.prepare("SELECT * FROM servers WHERE id = ?").get(String(id || ""));
+  return r ? rowToServerObj(r) : null;
+}
+
+export function addOrUpdateCustomServer({ id = null, name, url, adapter = "directory", folders = [], rootHrefOverride = null }) {
+  const normalizedUrl = normalizeServerInputUrl(url);
+  if (!isSafeServerUrl(normalizedUrl)) {
+    throw new Error("Invalid or unsafe server URL (only HTTP/HTTPS non-loopback servers are allowed)");
+  }
+  const u = new URL(normalizedUrl);
+  const origin = u.origin;
+  const safeAdapter = ["directory", "icc", "circleftp"].includes(adapter) ? adapter : "directory";
+
+  // Clean file-extension URLs like /dashboard.php or /index.html — NEVER turn them into /dashboard.php/!
+  let rootHref = rootHrefOverride || u.pathname || "/";
+  if (safeAdapter === "icc") {
+    rootHref = "/command.php";
+  } else if (safeAdapter === "circleftp") {
+    rootHref = "/";
+  } else {
+    if (/\/[^/]+\.(php|html?|aspx?|jsp|cgi|cfm)$/i.test(rootHref)) {
+      const idx = rootHref.lastIndexOf("/");
+      rootHref = idx > 0 ? rootHref.slice(0, idx + 1) : "/";
+    } else if (!rootHref.endsWith("/")) {
+      rootHref += "/";
+    }
+  }
+
+  // If upgrading a previously broken custom directory entry (e.g. http://10.16.100.244/dashboard.php/)
+  // to its auto-detected adapter (icc / circleftp), remove the stale empty duplicate first!
+  if (!id && (safeAdapter === "icc" || safeAdapter === "circleftp")) {
+    db.prepare("DELETE FROM servers WHERE origin = ? AND is_builtin = 0 AND adapter = 'directory'").run(origin);
+  }
+
+  // If an existing server with the same origin + adapter (or same origin + rootHref) already exists,
+  // re-enable & update it cleanly instead of creating duplicates!
+  let existingSame = null;
+  if (!id) {
+    existingSame = db.prepare("SELECT * FROM servers WHERE origin = ? AND adapter = ? LIMIT 1").get(origin, safeAdapter);
+    if (!existingSame && safeAdapter === "directory") {
+      existingSame = db.prepare("SELECT * FROM servers WHERE origin = ? AND root_href = ? LIMIT 1").get(origin, rootHref);
+    }
+  }
+
+  const cleanName = String(name || existingSame?.name || (safeAdapter === "icc" ? "ICC FTP Server" : safeAdapter === "circleftp" ? "CircleFTP" : u.hostname))
+    .trim()
+    .slice(0, 80) || u.hostname;
+  const slug = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 28) || "ftp";
+  const serverId = id || existingSame?.id || `custom-${slug}-${Date.now().toString(36).slice(-4)}`;
+  const sourceKey =
+    safeAdapter === "icc"
+      ? "icc"
+      : safeAdapter === "circleftp"
+        ? "circleftp"
+        : existingSame?.source || serverId;
+
+  const cleanFolders = Array.isArray(folders)
+    ? folders
+        .filter((f) => f && f.href && f.selected !== false)
+        .map((f) => ({
+          name: String(f.name || "Folder").slice(0, 80),
+          href: String(f.href),
+          category: String(f.category || "foreign"),
+          mediaType: f.mediaType === "series" ? "series" : "movie",
+          mode: f.mode === "flat" ? "flat" : "bucketed",
+        }))
+    : [];
+
+  db.prepare(`
+    INSERT INTO servers (
+      id, source, name, adapter, origin, root_href, ping_href,
+      enabled, is_builtin, optional, ping_timeout_ms, folders_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, 0, 0, 5500, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      adapter = excluded.adapter,
+      origin = excluded.origin,
+      root_href = excluded.root_href,
+      folders_json = CASE WHEN excluded.adapter = 'directory' THEN excluded.folders_json ELSE servers.folders_json END,
+      enabled = 1
+  `).run(serverId, sourceKey, cleanName, safeAdapter, origin, rootHref, JSON.stringify(cleanFolders), Date.now());
+
+  syncDynamicServerRegistry();
+  // If re-enabling or updating an existing server whose titles are already in DB, restore them right away!
+  if (existingSame) {
+    runDeduplication();
+  } else {
+    invalidateStatsCache();
+  }
+  return getServerById(serverId);
+}
+
+export function updateServerFolders(id, folders = []) {
+  if (!id || !Array.isArray(folders)) return;
+  const cleanFolders = folders
+    .filter((f) => f && f.href && f.selected !== false)
+    .map((f) => ({
+      name: String(f.name || "Folder").slice(0, 80),
+      href: String(f.href),
+      category: String(f.category || "foreign"),
+      mediaType: f.mediaType === "series" ? "series" : "movie",
+      mode: f.mode === "flat" ? "flat" : "bucketed",
+    }));
+  db.prepare("UPDATE servers SET folders_json = ? WHERE id = ?").run(JSON.stringify(cleanFolders), id);
+}
+
+function getEnabledServerSets() {
+  const rows = db.prepare("SELECT source, origin FROM servers WHERE enabled = 1").all();
+  const origins = new Set();
+  const sources = new Set();
+  for (const s of rows) {
+    if (s.origin) origins.add(s.origin);
+    if (s.source) sources.add(s.source);
+  }
+  return { origins, sources };
+}
+
+export function isMediaRowFromEnabledServer(row, sets = null) {
+  if (!row) return false;
+  const { origins, sources } = sets || getEnabledServerSets();
+  if (row.source === "dhakaflix" || row.source === "discoveryftp") {
+    return origins.has(row.origin);
+  }
+  return sources.has(row.source);
+}
+
+export function setServerEnabled(id, enabled) {
+  const srv = getServerById(id);
+  if (!srv) throw new Error("Server not found");
+  db.prepare("UPDATE servers SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, srv.id);
+  syncDynamicServerRegistry();
+  // Immediately hide disabled server files (and promote surviving mirrors) or restore when re-enabled!
+  runDeduplication();
+  return getServerById(srv.id);
+}
+
+export function deleteServerAndPurgeMedia(id) {
+  const srv = getServerById(id);
+  if (!srv) throw new Error("Server not found");
+
+  const isMultiNode = srv.source === "dhakaflix" || srv.source === "discoveryftp";
+  let deletedRows = 0;
+
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM servers WHERE id = ?").run(srv.id);
+    if (isMultiNode) {
+      const r = db.prepare("DELETE FROM media_items WHERE origin = ?").run(srv.origin);
+      deletedRows = Number(r.changes || 0);
+    } else {
+      const r = db.prepare("DELETE FROM media_items WHERE source = ? OR origin = ?").run(srv.source, srv.origin);
+      deletedRows = Number(r.changes || 0);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+
+  // Clean cached delta state for this server so re-adding later performs a fresh full scan
+  if (srv.source === "circleftp") setSyncState("circle_max_id", "0");
+  if (srv.source === "icc") setSyncState("icc_cat_counts", "{}");
+  try {
+    const customMtimes = JSON.parse(getSyncState("custom_bucket_mtimes") || "{}");
+    for (const k of Object.keys(customMtimes)) {
+      if (k.startsWith(srv.origin)) delete customMtimes[k];
+    }
+    setSyncState("custom_bucket_mtimes", JSON.stringify(customMtimes));
+  } catch {}
+
+  syncDynamicServerRegistry();
+  if (deletedRows > 0) {
+    runDeduplication();
+  } else {
+    invalidateStatsCache();
+  }
+  return { deletedServer: srv, deletedRows };
+}
+
+export function resetDefaultServers() {
+  const now = Date.now();
+  const stmt = db.prepare(`
+    INSERT INTO servers (
+      id, source, name, adapter, origin, root_href, ping_href,
+      enabled, is_builtin, optional, ping_timeout_ms, folders_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NULL, ?)
+    ON CONFLICT(id) DO UPDATE SET enabled = 1, name = excluded.name, origin = excluded.origin, root_href = excluded.root_href
+  `);
+  db.exec("BEGIN");
+  try {
+    for (const s of SERVERS) {
+      stmt.run(
+        s.id,
+        s.source,
+        s.name,
+        s.source,
+        s.origin,
+        s.rootHref || "/",
+        s.pingHref || null,
+        s.optional ? 1 : 0,
+        s.pingTimeoutMs || 5500,
+        now
+      );
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  setSyncState("servers_seeded_v1", "1");
+  syncDynamicServerRegistry();
+  runDeduplication();
+  return getAllServers();
+}
+
+export function getServerFilterOptions() {
+  const enabled = getEnabledServers();
+  const stats = getLibraryStats();
+  const bySource = new Map();
+  const builtinLabelMap = {
+    dhakaflix: "DhakaFlix",
+    icc: "ICC FTP",
+    circleftp: "CircleFTP",
+    discoveryftp: "DiscoveryFTP",
+  };
+  for (const s of enabled) {
+    if (!bySource.has(s.source)) {
+      bySource.set(s.source, {
+        value: s.source,
+        label: builtinLabelMap[s.source] || s.name,
+        count: stats.bySource?.[s.source] || 0,
+      });
+    }
+  }
+  return [...bySource.values()];
+}
+
+seedBuiltinServersIfNeeded();

@@ -315,19 +315,119 @@ export const SUBTITLE_EXTENSIONS = new Set([".srt", ".vtt", ".ass", ".ssa", ".su
 export const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 
 /**
- * SSRF protection: only allow DhakaFlix (172.16.50.x), ICC FTP + storage nodes (10.16.100.x),
- * CircleFTP (*.circleftp.net, 15.1.1.x), and DiscoveryFTP (*.discoveryftp.net, 172.16.16.x).
+ * Dynamic runtime server registry populated from SQLite `servers` table.
+ * Allows adding/removing HTTP/HTTPS FTP directory servers without hardcoding,
+ * while strictly blocking unsafe SSRF targets (loopback, link-local/metadata, non-HTTP schemes).
+ */
+const dynamicAllowedOrigins = new Set();
+const dynamicAllowedHosts = new Set();
+const dynamicSourceLabels = new Map();
+const dynamicOriginLabels = new Map();
+const activeBuiltinSources = new Set(["dhakaflix", "icc", "circleftp", "discoveryftp"]);
+let registryInitialized = false;
+
+export function setDynamicServerRegistry(servers = []) {
+  dynamicAllowedOrigins.clear();
+  dynamicAllowedHosts.clear();
+  dynamicSourceLabels.clear();
+  dynamicOriginLabels.clear();
+  activeBuiltinSources.clear();
+  registryInitialized = true;
+
+  for (const s of servers) {
+    if (!s) continue;
+    if (s.source && s.name && !dynamicSourceLabels.has(s.source)) {
+      dynamicSourceLabels.set(s.source, s.name);
+    }
+    if (s.origin && s.name) {
+      dynamicOriginLabels.set(s.origin, s.name);
+    }
+    if (s.enabled === 0 || s.enabled === false) continue;
+    if (["dhakaflix", "icc", "circleftp", "discoveryftp"].includes(s.source)) {
+      activeBuiltinSources.add(s.source);
+    }
+    try {
+      const u = new URL(s.origin);
+      dynamicAllowedOrigins.add(u.origin);
+      dynamicAllowedHosts.add(u.hostname.toLowerCase());
+    } catch {}
+  }
+}
+
+export function getDynamicServerLabel(source, origin) {
+  if (origin && dynamicOriginLabels.has(origin)) return dynamicOriginLabels.get(origin);
+  if (source && dynamicSourceLabels.has(source)) return dynamicSourceLabels.get(source);
+  return null;
+}
+
+/**
+ * Normalize user-typed server URLs: auto-prepend http:// when scheme is omitted
+ * (e.g. "172.16.50.14", "10.16.100.244/dashboard.php", "ftp.example.com/movies").
+ */
+export function normalizeServerInputUrl(rawUrl) {
+  let s = String(rawUrl || "").trim();
+  if (!s) return "";
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) {
+    s = `http://${s}`;
+  }
+  return s;
+}
+
+/**
+ * SSRF safety guard for probing / adding custom servers:
+ * permits HTTP/HTTPS to BDIX/LAN/public servers while blocking localhost, loopback,
+ * IPv6 loopback, link-local / cloud metadata (169.254.x.x), and file:// URLs.
+ */
+export function isSafeServerUrl(rawUrl) {
+  try {
+    const normalized = normalizeServerInputUrl(rawUrl);
+    if (!normalized) return false;
+    const u = new URL(normalized);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!h) return false;
+    if (h === "localhost" || h.endsWith(".localhost") || h === "0.0.0.0" || h === "::1" || h === "::") {
+      return false;
+    }
+    if (/^127\./.test(h)) return false;
+    if (/^169\.254\./.test(h)) return false;
+    if (/^fe80:/i.test(h)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * URL allowlist combining dynamically configured servers in SQLite + active built-in mirror ranges.
  */
 export function isAllowedUrl(rawUrl) {
+  if (!isSafeServerUrl(rawUrl)) return false;
   try {
-    const u = new URL(rawUrl);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-    if (DHAKAFLIX_ORIGINS.has(u.origin)) return true;
-    if (/^10\.16\.100\.\d{1,3}$/.test(u.hostname)) return true;
-    if (u.hostname === "circleftp.net" || u.hostname.endsWith(".circleftp.net")) return true;
-    if (/^15\.1\.1\.\d{1,3}$/.test(u.hostname)) return true;
-    if (u.hostname === "discoveryftp.net" || u.hostname.endsWith(".discoveryftp.net")) return true;
-    if (/^172\.16\.16\.\d{1,3}$/.test(u.hostname)) return true;
+    const u = new URL(normalizeServerInputUrl(rawUrl));
+    const h = u.hostname.toLowerCase();
+    if (dynamicAllowedOrigins.has(u.origin) || dynamicAllowedHosts.has(h)) return true;
+
+    // Allow sibling subdomains of any enabled custom domain server (e.g. ftp.example.com -> cdn1.example.com)
+    for (const allowedHost of dynamicAllowedHosts) {
+      if (!allowedHost || /^\d+\.\d+\.\d+\.\d+$/.test(allowedHost)) continue;
+      if (h.endsWith("." + allowedHost)) return true;
+      const parts = allowedHost.split(".");
+      if (parts.length >= 3) {
+        const rootDom = parts.slice(-2).join(".");
+        if (rootDom.length >= 5 && (h === rootDom || h.endsWith("." + rootDom))) return true;
+      }
+    }
+
+    const allowDf = !registryInitialized || activeBuiltinSources.has("dhakaflix");
+    const allowIcc = !registryInitialized || activeBuiltinSources.has("icc");
+    const allowCircle = !registryInitialized || activeBuiltinSources.has("circleftp");
+    const allowDisc = !registryInitialized || activeBuiltinSources.has("discoveryftp");
+
+    if (allowDf && (DHAKAFLIX_ORIGINS.has(u.origin) || /^172\.16\.50\.\d{1,3}$/.test(h))) return true;
+    if (allowIcc && /^10\.16\.100\.\d{1,3}$/.test(h)) return true;
+    if (allowCircle && (h === "circleftp.net" || h.endsWith(".circleftp.net") || /^15\.1\.1\.\d{1,3}$/.test(h))) return true;
+    if (allowDisc && (h === "discoveryftp.net" || h.endsWith(".discoveryftp.net") || /^172\.16\.16\.\d{1,3}$/.test(h))) return true;
     return false;
   } catch {
     return false;

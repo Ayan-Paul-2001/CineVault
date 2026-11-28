@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import zlib from "node:zlib";
-import { PORT, HOST, DATA_DIR, DIST_DIR, PUBLIC_DIR, CATEGORIES, SERVERS, isAllowedUrl } from "./src/config.js";
+import { PORT, HOST, DATA_DIR, DIST_DIR, PUBLIC_DIR, CATEGORIES, isAllowedUrl, isSafeServerUrl, normalizeServerInputUrl } from "./src/config.js";
 import {
   getCatalogVersion,
   getLibraryStats,
@@ -22,17 +22,26 @@ import {
   removeWatchHistory,
   removeMediaWatchHistory,
   clearWatchHistory,
+  getAllServers,
+  getEnabledServers,
+  addOrUpdateCustomServer,
+  setServerEnabled,
+  deleteServerAndPurgeMedia,
+  resetDefaultServers,
+  getServerFilterOptions,
+  isMediaRowFromEnabledServer,
 } from "./src/db.js";
 import {
   startSync,
   getSyncStatus,
   syncEvents,
   getServersHealth,
+  invalidateHealthCache,
   scheduleAutoSync,
   updateAutoSyncSettings,
 } from "./src/indexer.js";
 import { hydrateItem, hydrateAllEditions, enrichItemMetadata, servePoster, safeJson } from "./src/metadata.js";
-import { listDirectory, searchUpstream } from "./src/h5ai.js";
+import { listDirectory, searchUpstream, probeDirectoryServer } from "./src/h5ai.js";
 import { searchIccUpstream, getIccSession, setIccSession } from "./src/icc.js";
 import { searchCircleUpstream } from "./src/circleftp.js";
 import {
@@ -217,7 +226,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      // 2. Categories with counts, years & languages
+      // 2. Categories with counts, years, languages & dynamic active servers
       if (pathname === "/api/categories" && method === "GET") {
         const stats = getLibraryStats();
         return sendJson(res, {
@@ -227,8 +236,110 @@ const server = http.createServer(async (req, res) => {
           })),
           years: stats.years,
           languages: stats.languages || [],
+          servers: getServerFilterOptions(),
           stats,
         });
+      }
+
+      // 2b. Dynamic Server Manager CRUD (List / Probe / Add / Toggle / Delete / Reset Defaults)
+      if (pathname === "/api/servers" && method === "GET") {
+        const force = reqUrl.searchParams.get("force") === "1";
+        const servers = await getServersHealth(force);
+        return sendJson(res, { servers, serverFilters: getServerFilterOptions() });
+      }
+      if (pathname === "/api/servers/probe" && method === "POST") {
+        const body = await readJsonBody(req).catch(() => ({}));
+        const rawUrl = normalizeServerInputUrl(body.url);
+        if (!isSafeServerUrl(rawUrl)) {
+          return sendJson(res, { error: "Please enter a valid FTP server URL (loopback addresses blocked)." }, 400);
+        }
+        try {
+          const probe = await probeDirectoryServer(rawUrl, 8500);
+          return sendJson(res, probe);
+        } catch (err) {
+          return sendJson(res, { error: err.message || "Could not reach server" }, 502);
+        }
+      }
+      if (pathname === "/api/servers" && method === "POST") {
+        const body = await readJsonBody(req).catch(() => ({}));
+        try {
+          let targetUrl = normalizeServerInputUrl(body.url);
+          if (!isSafeServerUrl(targetUrl)) {
+            return sendJson(res, { error: "Please enter a valid FTP server URL (loopback addresses blocked)." }, 400);
+          }
+          let adapter = ["icc", "circleftp", "directory"].includes(body.adapter) ? body.adapter : "directory";
+          let folders = Array.isArray(body.folders) ? body.folders : [];
+          let resolvedName = body.name;
+          let resolvedRootHref = null;
+          // Fully automatic detection of protocol (ICC / CircleFTP / h5ai / Apache / Nginx / Portal) & ALL compatible folders!
+          if ((folders.length === 0 || body.adapter === "auto" || !body.adapter) && body.autoDiscover !== false) {
+            try {
+              const probe = await probeDirectoryServer(targetUrl, 8000);
+              if (probe?.ok) {
+                if (probe.detectedAdapter) adapter = probe.detectedAdapter;
+                if (probe.origin) targetUrl = probe.origin + (probe.rootHref || "/");
+                if (probe.rootHref) resolvedRootHref = probe.rootHref;
+                if (!resolvedName && probe.suggestedName) resolvedName = probe.suggestedName;
+                if (Array.isArray(probe.folders) && probe.folders.length > 0) {
+                  folders = probe.folders.filter((f) => f.selected !== false);
+                }
+              }
+            } catch {}
+          }
+          const created = addOrUpdateCustomServer({
+            id: body.id || null,
+            name: resolvedName,
+            url: targetUrl,
+            adapter,
+            folders,
+            rootHrefOverride: resolvedRootHref,
+          });
+          invalidateHealthCache();
+          invalidateHomeCache();
+          let syncRes = null;
+          if (body.syncNow !== false) {
+            syncRes = await startSync("full", created.id);
+          }
+          return sendJson(res, { ok: true, server: created, sync: syncRes, servers: getAllServers(), stats: getLibraryStats(true) });
+        } catch (err) {
+          return sendJson(res, { error: err.message || "Failed to save server" }, 400);
+        }
+      }
+      if (pathname === "/api/servers/reset" && method === "POST") {
+        const servers = resetDefaultServers();
+        invalidateHealthCache();
+        invalidateHomeCache();
+        return sendJson(res, { ok: true, servers, stats: getLibraryStats(true) });
+      }
+      const srvToggleMatch = pathname.match(/^\/api\/servers\/([^/]+)\/toggle$/);
+      if (srvToggleMatch && method === "POST") {
+        const id = decodeURIComponent(srvToggleMatch[1]);
+        const body = await readJsonBody(req).catch(() => ({}));
+        try {
+          const updated = setServerEnabled(id, Boolean(body.enabled));
+          invalidateHealthCache();
+          invalidateHomeCache();
+          return sendJson(res, { ok: true, server: updated, servers: getAllServers(), stats: getLibraryStats(true) });
+        } catch (err) {
+          return sendJson(res, { error: err.message }, 404);
+        }
+      }
+      const srvDeleteMatch = pathname.match(/^\/api\/servers\/([^/]+)$/);
+      if (srvDeleteMatch && method === "DELETE") {
+        const id = decodeURIComponent(srvDeleteMatch[1]);
+        try {
+          const result = deleteServerAndPurgeMedia(id);
+          invalidateHealthCache();
+          invalidateHomeCache();
+          return sendJson(res, {
+            ok: true,
+            deletedRows: result.deletedRows,
+            servers: getAllServers(),
+            stats: getLibraryStats(true),
+          });
+        } catch (err) {
+          return sendJson(res, { error: err.message }, 404);
+        }
       }
 
       // 3. Home curated feed (per-device private Continue Watching & Watchlist)
@@ -258,15 +369,18 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, result);
       }
 
-      // 5. Live upstream search across DhakaFlix + ICC FTP + CircleFTP + DiscoveryFTP
+      // 5. Live upstream search across enabled servers
       if (pathname === "/api/search/upstream" && method === "GET") {
         const q = (reqUrl.searchParams.get("q") || "").trim();
         if (q.length < 2) return sendJson(res, { items: [] });
-        const h5aiServers = SERVERS.filter((s) => s.source === "dhakaflix" || s.source === "discoveryftp");
+        const enabled = getEnabledServers();
+        const h5aiServers = enabled.filter((s) => s.adapter === "dhakaflix" || s.adapter === "discoveryftp" || s.adapter === "directory");
+        const hasIcc = enabled.some((s) => s.adapter === "icc");
+        const hasCircle = enabled.some((s) => s.adapter === "circleftp");
         const [h5aiBatches, iccResults, circleResults] = await Promise.all([
           Promise.all(h5aiServers.map((s) => searchUpstream(s.origin, s.rootHref, q, 6000).catch(() => []))),
-          searchIccUpstream(q, 6000).catch(() => []),
-          searchCircleUpstream(q, 6000).catch(() => []),
+          hasIcc ? searchIccUpstream(q, 6000).catch(() => []) : Promise.resolve([]),
+          hasCircle ? searchCircleUpstream(q, 6000).catch(() => []) : Promise.resolve([]),
         ]);
         const combined = [...circleResults, ...iccResults, ...h5aiBatches.flat()].slice(0, 100);
         return sendJson(res, { items: combined });
@@ -279,7 +393,9 @@ const server = http.createServer(async (req, res) => {
         const force = reqUrl.searchParams.get("refresh") === "1";
         const enrich = reqUrl.searchParams.get("enrich") !== "0";
         let item = await hydrateItem(id, { deep: true, force });
-        if (!item) return sendJson(res, { error: "Item not found" }, 404);
+        if (!item || !isMediaRowFromEnabledServer(item)) {
+          return sendJson(res, { error: "Item unavailable (server disabled or removed)" }, 404);
+        }
 
         const mirrors = getMergedMirrors(item);
         const [editions, enrichedMeta] = await Promise.all([
@@ -465,7 +581,9 @@ const server = http.createServer(async (req, res) => {
         const href = reqUrl.searchParams.get("href");
         if (!origin || !href) {
           return sendJson(res, {
-            servers: SERVERS.filter((s) => s.source === "dhakaflix" || s.source === "discoveryftp"),
+            servers: getEnabledServers().filter(
+              (s) => s.adapter === "dhakaflix" || s.adapter === "discoveryftp" || s.adapter === "directory"
+            ),
           });
         }
         if (!isAllowedUrl(origin + "/")) {
@@ -542,8 +660,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (pathname === "/api/sync" && method === "POST") {
         const body = await readJsonBody(req).catch(() => ({}));
-        const mode = ["quick", "full", "icc", "circle", "discovery"].includes(body.mode) ? body.mode : "full";
-        return sendJson(res, await startSync(mode));
+        const mode = ["quick", "full", "icc", "circle", "discovery", "custom"].includes(body.mode) ? body.mode : "full";
+        const targetId = body.serverId ? String(body.serverId) : null;
+        return sendJson(res, await startSync(mode, targetId));
       }
       if (pathname === "/api/sync/events" && method === "GET") {
         res.writeHead(200, {
@@ -679,22 +798,26 @@ server.listen(PORT, HOST, () => {
   scheduleAutoSync();
 
   const lastSync = Number(stats.lastSync || 0);
+  const enabledList = getEnabledServers();
+  const hasEnabledIcc = enabledList.some((s) => s.adapter === "icc");
+  const hasEnabledCircle = enabledList.some((s) => s.adapter === "circleftp");
+  const hasEnabledDisc = enabledList.some((s) => s.adapter === "discoveryftp");
   const hasIcc = (stats.bySource?.icc || 0) > 0;
   const hasCircle = (stats.bySource?.circleftp || 0) > 0;
   const hasDiscovery = (stats.bySource?.discoveryftp || 0) > 0;
-  if (stats.total === 0) {
+  if (stats.total === 0 && enabledList.length > 0) {
     console.log("  [indexer] First launch detected — starting full multi-server sync...");
     startSync("full");
-  } else if (!hasDiscovery) {
-    console.log("  [indexer] DiscoveryFTP added — syncing DiscoveryFTP & merging highest quality...");
+  } else if (hasEnabledDisc && !hasDiscovery) {
+    console.log("  [indexer] DiscoveryFTP enabled — syncing DiscoveryFTP & merging highest quality...");
     startSync("discovery");
-  } else if (!hasCircle) {
-    console.log("  [indexer] CircleFTP added — syncing CircleFTP & merging highest quality...");
+  } else if (hasEnabledCircle && !hasCircle) {
+    console.log("  [indexer] CircleFTP enabled — syncing CircleFTP & merging highest quality...");
     startSync("circle");
-  } else if (!hasIcc) {
-    console.log("  [indexer] ICC FTP server added — syncing ICC FTP & merging highest quality...");
+  } else if (hasEnabledIcc && !hasIcc) {
+    console.log("  [indexer] ICC FTP server enabled — syncing ICC FTP & merging highest quality...");
     startSync("icc");
-  } else if (Date.now() - lastSync > 1000 * 60 * 60) {
+  } else if (enabledList.length > 0 && Date.now() - lastSync > 1000 * 60 * 60) {
     console.log("  [indexer] Running quick incremental sync for newly uploaded files...");
     startSync("quick");
   }

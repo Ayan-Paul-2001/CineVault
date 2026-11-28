@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Minimal permissions only: network access for local BDIX media servers and HTTPS GitHub update checks.
+    <!-- Minimal permissions only: network access for BDIX media servers, HTTPS updates, and media playback foreground service.
          Intentionally omits in-app package installer, external storage, location, and package-query permissions
          to pass Google Play Protect and antivirus scanners cleanly. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Universal Phone + Tablet + Android TV / Google TV support -->
     <uses-feature
@@ -53,8 +56,16 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:exported="false"
             android:hardwareAccelerated="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
             android:screenOrientation="sensorLandscape"
+            android:supportsPictureInPicture="true"
             android:theme="@style/Theme.CineVault.Player" />
+
+        <service
+            android:name=".player.MediaPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 
     <queries>

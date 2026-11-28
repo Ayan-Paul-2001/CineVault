@@ -31,6 +31,8 @@ export default function App() {
   const [categories, setCategories] = useState([]);
   const [years, setYears] = useState([]);
   const [languages, setLanguages] = useState([]);
+  const [serverOptions, setServerOptions] = useState([]);
+  const [catalogTick, setCatalogTick] = useState(0);
   const [stats, setStats] = useState(null);
   const [sync, setSync] = useState({ running: false, percent: 0, autoSyncEnabled: true });
 
@@ -97,6 +99,7 @@ export default function App() {
       setCategories(data.categories || []);
       setYears(data.years || []);
       setLanguages(data.languages || []);
+      setServerOptions(data.servers || []);
       if (data.stats) setStats(data.stats);
     } catch { }
   }, []);
@@ -201,12 +204,12 @@ export default function App() {
     return () => {
       controller.abort();
     };
-  }, [tab, filters]);
+  }, [tab, filters, catalogTick]);
 
-  // Load My List when opened
+  // Load My List when opened or when servers/catalog change
   useEffect(() => {
     if (tab === "mylist") loadMyList();
-  }, [tab, loadMyList]);
+  }, [tab, loadMyList, catalogTick]);
 
   // Search typing with adaptive debounce
   const handleSearchChange = (val) => {
@@ -553,11 +556,18 @@ export default function App() {
       )
       : 0;
 
-  const handleTriggerSync = async (mode) => {
+  const handleTriggerSync = async (mode, serverId = null) => {
     try {
-      const res = await apiPost("/api/sync", { mode });
+      const payload = serverId ? { mode, serverId } : { mode };
+      const res = await apiPost("/api/sync", payload);
       if (res.started) {
-        notify(mode === "quick" ? "Syncing new uploads across all servers..." : "Full multi-server library sync started");
+        notify(
+          serverId
+            ? "Syncing selected server..."
+            : mode === "quick"
+              ? "Syncing new uploads across enabled servers..."
+              : "Full multi-server library sync started"
+        );
       } else {
         notify("A sync is already running");
       }
@@ -565,6 +575,12 @@ export default function App() {
       notify("Sync error: " + e.message);
     }
   };
+
+  const handleServersChanged = useCallback(() => {
+    loadHome();
+    loadCategories();
+    setCatalogTick((t) => t + 1);
+  }, [loadHome, loadCategories]);
 
   const handleSelectCard = useCallback((item, progress = null, autoPlay = false) => {
     // If clicked from Continue Watching and we know the exact file URL, resume straight into Player!
@@ -870,6 +886,7 @@ export default function App() {
                 categories={visibleCategories}
                 years={filterYears}
                 languages={filterLanguages}
+                servers={serverOptions}
                 facets={searchFacets}
                 filters={filters}
                 onChangeFilters={(patch) => setFilters((f) => ({ ...f, ...patch }))}
@@ -1243,6 +1260,7 @@ export default function App() {
           stats={stats}
           onClose={() => setShowSyncDrawer(false)}
           onTriggerSync={handleTriggerSync}
+          onServersChanged={handleServersChanged}
           onNotify={notify}
         />
       )}

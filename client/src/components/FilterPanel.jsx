@@ -14,11 +14,11 @@ const AUDIO_OPTIONS = [
   { value: "hindi-dubbed", label: "Hindi Dubbed" },
 ];
 
-const SERVER_OPTIONS = [
-  { value: "icc", label: "ICC FTP Primary" },
-  { value: "dhakaflix", label: "DhakaFlix Primary" },
-  { value: "circleftp", label: "CircleFTP Primary" },
-  { value: "discoveryftp", label: "DiscoveryFTP Primary" },
+const DEFAULT_SERVER_OPTIONS = [
+  { value: "icc", label: "ICC FTP" },
+  { value: "dhakaflix", label: "DhakaFlix" },
+  { value: "circleftp", label: "CircleFTP" },
+  { value: "discoveryftp", label: "DiscoveryFTP" },
 ];
 
 const FilterPanel = memo(function FilterPanel({
@@ -26,6 +26,7 @@ const FilterPanel = memo(function FilterPanel({
   categories,
   years,
   languages,
+  servers = [],
   facets = null,
   filters,
   onChangeFilters,
@@ -34,6 +35,25 @@ const FilterPanel = memo(function FilterPanel({
   const [expanded, setExpanded] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth > 768 : true
   );
+
+  // Merge live dynamic servers from /api/categories with any source present in current search facets
+  const serverMap = new Map();
+  const baseServers = servers && servers.length > 0 ? servers : DEFAULT_SERVER_OPTIONS;
+  for (const s of baseServers) {
+    if (s && s.value) serverMap.set(s.value, { value: s.value, label: s.label || s.value });
+  }
+  if (facets?.sources) {
+    for (const srcKey of Object.keys(facets.sources)) {
+      if (!serverMap.has(srcKey)) {
+        const fallback = DEFAULT_SERVER_OPTIONS.find((o) => o.value === srcKey);
+        serverMap.set(srcKey, { value: srcKey, label: fallback ? fallback.label : srcKey });
+      }
+    }
+  }
+  if (filters.source && !serverMap.has(filters.source)) {
+    serverMap.set(filters.source, { value: filters.source, label: filters.source });
+  }
+  const serverOptions = [...serverMap.values()];
 
   const activeCategoryObj = categories.find((c) => c.id === filters.category);
 
@@ -76,15 +96,10 @@ const FilterPanel = memo(function FilterPanel({
     });
   }
   if (filters.source) {
-    const srcLabels = {
-      icc: "ICC FTP",
-      dhakaflix: "DhakaFlix",
-      circleftp: "CircleFTP",
-      discoveryftp: "DiscoveryFTP",
-    };
+    const matchedServer = serverMap.get(filters.source);
     activeChips.push({
       key: "source",
-      label: srcLabels[filters.source] || filters.source,
+      label: matchedServer ? matchedServer.label : filters.source,
       clear: () => onChangeFilters({ source: "", page: 1 }),
     });
   }
@@ -289,7 +304,7 @@ const FilterPanel = memo(function FilterPanel({
                 onChange={(e) => onChangeFilters({ source: e.target.value, page: 1 })}
               >
                 <option value="">All Servers (Merged)</option>
-                {SERVER_OPTIONS.filter(
+                {serverOptions.filter(
                   (o) => !facets || (facets.sources?.[o.value] || 0) > 0 || filters.source === o.value
                 ).map((o) => {
                   const cnt = facets?.sources?.[o.value];

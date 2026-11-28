@@ -242,9 +242,19 @@
                 android:layout_width="40dp"
                 android:layout_height="40dp"
                 android:background="@drawable/bg_tv_button_focus"
-                android:contentDescription="Back"
+                android:contentDescription="Close player"
                 android:focusable="true"
                 android:src="@drawable/ic_back"
+                app:tint="#FFFFFF" />
+
+            <ImageButton
+                android:id="@+id/btn_player_minimize"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/bg_tv_button_focus"
+                android:contentDescription="Minimize to mini player"
+                android:focusable="true"
+                android:src="@drawable/ic_minimize"
                 app:tint="#FFFFFF" />
 
             <LinearLayout
@@ -273,6 +283,16 @@
                     android:textColor="@color/cv_text_muted"
                     android:textSize="11.5sp" />
             </LinearLayout>
+
+            <ImageButton
+                android:id="@+id/btn_player_pip"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/bg_tv_button_focus"
+                android:contentDescription="Picture-in-Picture"
+                android:focusable="true"
+                android:src="@drawable/ic_pip"
+                app:tint="#FFFFFF" />
 
             <ImageButton
                 android:id="@+id/btn_player_rotate"
@@ -402,6 +422,20 @@
                         android:textSize="12.5sp"
                         android:textStyle="bold"
                         android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/btn_player_bg_play"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_tv_button_focus"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="6dp"
+                        android:text="BG On"
+                        android:textColor="@color/cv_green"
+                        android:textSize="12.5sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/btn_player_speed"

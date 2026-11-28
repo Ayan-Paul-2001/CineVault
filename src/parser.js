@@ -206,7 +206,13 @@ export function parseCirclePost(post, classified) {
  * Parse a DhakaFlix folder name into crisp structured movie/series metadata.
  */
 export function parseFolderName(rawName, categoryDef = null, subGroup = null, source = "dhakaflix") {
-  let name = (rawName || "").replace(/\/+$/, "").trim();
+  const origRaw = (rawName || "").replace(/\/+$/, "").trim();
+  let name = origRaw.replace(/\.(mkv|mp4|webm|avi|mov|m4v|ts|flv|wmv|mpg|mpeg)$/i, "").trim();
+  const dotCount = (name.match(/\./g) || []).length;
+  const spaceCount = (name.match(/\s/g) || []).length;
+  if (dotCount >= 2 && dotCount > spaceCount) {
+    name = name.replace(/\./g, " ").replace(/\s+/g, " ").trim();
+  }
   let imdbRank = null;
 
   if (categoryDef?.id === "imdb-top-250") {
@@ -265,10 +271,18 @@ export function parseFolderName(rawName, categoryDef = null, subGroup = null, so
   if (parenYearMatch) {
     year = parseInt(parenYearMatch[1], 10);
     titleCutIndex = parenYearMatch.index;
-  } else if (subGroup) {
-    const subYear = subGroup.match(/\b((?:19|20)\d{2})\b/);
-    if (subYear && !/before|-/i.test(subGroup)) {
-      year = parseInt(subYear[1], 10);
+  } else {
+    const bareYearMatch = name.match(
+      /\s+((?:19|20)\d{2})(?=\s+(?:2160p|4K|UHD|1080p|720p|480p|DS4K|WEB|BluRay|BDRip|BRRip|HDRip|DVDRip|HDTV|ESub|x264|x265|HEVC|10bit|Dual|Multi|Hindi|Tamil|Telugu|Bangla)|$)/i
+    );
+    if (bareYearMatch && bareYearMatch.index > 1) {
+      year = parseInt(bareYearMatch[1], 10);
+      titleCutIndex = bareYearMatch.index;
+    } else if (subGroup) {
+      const subYear = subGroup.match(/\b((?:19|20)\d{2})\b/);
+      if (subYear && !/before|-/i.test(subGroup)) {
+        year = parseInt(subYear[1], 10);
+      }
     }
   }
 
@@ -281,6 +295,7 @@ export function parseFolderName(rawName, categoryDef = null, subGroup = null, so
   if (titleCutIndex <= 0) {
     title = title
       .replace(/\[[^\]]+\]/g, " ")
+      .replace(/\b(DS4K|ESubs?|MSub|x264|x265|H\.?264|H\.?265|HEVC|10bit|8bit|AAC(?:\d\.\d)?|DDP?\d\.\d|AC3|DTS|HQ|HDR10\+?|HDR|DV|HC)\b/gi, " ")
       .replace(QUALITY_RE, " ")
       .replace(SOURCE_RE, " ")
       .replace(LANG_PAREN_RE, " ");
@@ -308,7 +323,7 @@ export function parseFolderName(rawName, categoryDef = null, subGroup = null, so
   });
 
   return {
-    rawName: rawName.replace(/\/+$/, "").trim(),
+    rawName: origRaw,
     title,
     cleanTitle: normalizeTitleForMatch(title),
     year,

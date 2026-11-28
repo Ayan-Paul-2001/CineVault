@@ -11,6 +11,7 @@ import com.cinevault.app.data.IccService;
 import com.cinevault.app.data.MediaRepository;
 import com.cinevault.app.data.MetadataService;
 import com.cinevault.app.data.UpdateService;
+import com.cinevault.app.player.PlaybackManager;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +29,7 @@ public final class CineVaultApp extends Application {
     public OkHttpClient httpClient;
     public OkHttpClient streamingClient;
     public MediaRepository repository;
+    public PlaybackManager playbackManager;
     public final ExecutorService ioExecutor = Executors.newCachedThreadPool();
     public final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -66,6 +68,7 @@ public final class CineVaultApp extends Application {
         MetadataService meta = new MetadataService(db, h5ai, icc, circle, httpClient);
         UpdateService updater = new UpdateService(httpClient);
         repository = new MediaRepository(db, h5ai, icc, circle, meta, updater);
+        playbackManager = new PlaybackManager(this);
     }
 
     public static CineVaultApp get() {

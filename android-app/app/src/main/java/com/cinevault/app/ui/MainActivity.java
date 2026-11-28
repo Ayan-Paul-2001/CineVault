@@ -30,6 +30,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -37,11 +38,13 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.cinevault.app.CineVaultApp;
 import com.cinevault.app.R;
+import com.cinevault.app.data.H5aiService;
 import com.cinevault.app.data.MediaDownloadManager;
 import com.cinevault.app.data.MediaRepository;
 import com.cinevault.app.data.Models;
 import com.cinevault.app.data.ServerConfig;
 import com.cinevault.app.data.UpdateService;
+import com.cinevault.app.player.PlaybackManager;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.chip.Chip;
@@ -108,6 +111,9 @@ public final class MainActivity extends AppCompatActivity {
     private ProgressBar topSyncProgress;
     private View updateBanner;
     private TextView updateBannerText, updateBannerSub;
+    private View v142FeaturePopup;
+    private ProgressBar v142FeaturePopupBar;
+    private android.animation.ObjectAnimator v142FeaturePopupAnimator;
 
     // Tab views & responsive containers
     private SwipeRefreshLayout homeSwipe;
@@ -162,14 +168,46 @@ public final class MainActivity extends AppCompatActivity {
     };
 
     // Dedicated Servers, Health, Auto-Sync & App Updates widgets
-    private TextView srvStatsSummary, srvStatsDups, srvStatsSources, srvSyncLabel, srvSyncErrors;
+    private TextView srvMetricTotal, srvMetricMovies, srvMetricSeries;
+    private TextView srvStatsDups, srvStatsSources, srvSyncLabel, srvSyncErrors;
+    private TextView srvListHeaderTitle, srvListStatusStrip;
     private ProgressBar srvSyncBar;
-    private MaterialButton btnSrvSyncQuick, btnSrvSyncFull, btnSrvPingAll;
+    private MaterialButton btnSrvSyncQuick, btnSrvSyncFull, btnSrvPingAll, btnSrvAddServer, btnSrvResetDefaults;
     private TextView srvLastSyncText, srvAppVersion, srvUpdateStatus, srvUpdateNotes;
     private MaterialSwitch switchAutoSync;
     private Spinner spinAutoSyncInterval;
     private LinearLayout srvHealthList;
     private MaterialButton btnSrvCheckUpdates, btnSrvDownloadUpdate;
+    private volatile List<Models.ServerFilterOption> cachedServerFilterOptions = Collections.emptyList();
+
+    // YouTube Premium-Style In-App Minimizable Mini-Player Drawer Bar widgets
+    private View miniPlayerBar, miniPlayerContent;
+    private PlayerView miniPlayerVideo;
+    private ProgressBar miniPlayerProgress;
+    private TextView miniPlayerTitle, miniPlayerSub;
+    private ImageButton btnMiniPlayPause, btnMiniClose;
+
+    private final PlaybackManager.Listener miniPlayerListener = new PlaybackManager.Listener() {
+        @Override
+        public void onSessionChanged(Models.PlaybackSession session) {
+            uiHandler.post(MainActivity.this::updateMiniPlayerUi);
+        }
+
+        @Override
+        public void onPlaybackStateChanged(int playbackState, boolean isPlaying) {
+            uiHandler.post(MainActivity.this::updateMiniPlayerUi);
+        }
+
+        @Override
+        public void onPositionUpdated(long posMs, long durMs) {
+            uiHandler.post(() -> updateMiniPlayerProgress(posMs, durMs));
+        }
+
+        @Override
+        public void onSessionStopped() {
+            uiHandler.post(MainActivity.this::hideMiniPlayerBar);
+        }
+    };
 
     private Runnable pendingSearchRunnable;
 
@@ -185,6 +223,8 @@ public final class MainActivity extends AppCompatActivity {
                     .start();
         }
     };
+
+    private final Runnable hideV142FeaturePopupRunnable = this::dismissV142FeaturePopup;
 
     private final Runnable autoUpdateCheckRunnable = new Runnable() {
         @Override
@@ -217,6 +257,7 @@ public final class MainActivity extends AppCompatActivity {
         }
     };
 
+    private boolean lastSyncRunningState = false;
     private final MediaRepository.SyncListener syncListener = p -> uiHandler.post(() -> {
         boolean showTopIndicator = p.running && !p.silent;
         topSyncProgress.setVisibility(showTopIndicator ? View.VISIBLE : View.GONE);
@@ -229,6 +270,15 @@ public final class MainActivity extends AppCompatActivity {
             if (!p.running) homeSwipe.setRefreshing(false);
         }
         renderServersSyncProgress(p);
+        if (lastSyncRunningState && !p.running) {
+            app.ioExecutor.execute(() -> {
+                cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                uiHandler.post(() -> {
+                    if (currentTab == 5) loadServersTab(false);
+                });
+            });
+        }
+        lastSyncRunningState = p.running;
     });
 
     @Override
@@ -246,6 +296,7 @@ public final class MainActivity extends AppCompatActivity {
 
         bootstrapCatalogAndHome();
         handleOpenTabIntent(getIntent());
+        maybeShowOneTimeV142ServerFeaturePopup();
         checkForUpdatesBackground(true);
         uiHandler.postDelayed(heroRotateRunnable, 8000);
         uiHandler.postDelayed(autoSyncCheckRunnable, 60000);
@@ -316,6 +367,10 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (app.playbackManager != null) {
+            app.playbackManager.addListener(miniPlayerListener);
+            updateMiniPlayerUi();
+        }
         if (currentTab == 0) loadHome(false);
         else if (currentTab == 3) {
             loadMyList();
@@ -328,13 +383,25 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         uiHandler.removeCallbacks(downloadsPollRunnable);
+        if (app.playbackManager != null) {
+            app.playbackManager.removeListener(miniPlayerListener);
+            app.playbackManager.detachPlayerView(miniPlayerVideo);
+        }
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         uiHandler.removeCallbacksAndMessages(null);
+        if (v142FeaturePopupAnimator != null) {
+            v142FeaturePopupAnimator.cancel();
+            v142FeaturePopupAnimator = null;
+        }
         app.repository.removeSyncListener(syncListener);
+        if (app.playbackManager != null) {
+            app.playbackManager.removeListener(miniPlayerListener);
+            app.playbackManager.detachPlayerView(miniPlayerVideo);
+        }
         super.onDestroy();
     }
 
@@ -356,6 +423,19 @@ public final class MainActivity extends AppCompatActivity {
         updateBanner = findViewById(R.id.update_banner);
         updateBannerText = findViewById(R.id.update_banner_text);
         updateBannerSub = findViewById(R.id.update_banner_sub);
+        v142FeaturePopup = findViewById(R.id.v142_feature_popup);
+        v142FeaturePopupBar = findViewById(R.id.v142_feature_popup_bar);
+        View btnV142Open = findViewById(R.id.btn_v142_feature_open);
+        View btnV142Close = findViewById(R.id.btn_v142_feature_close);
+        if (btnV142Open != null) {
+            btnV142Open.setOnClickListener(v -> {
+                dismissV142FeaturePopup();
+                switchTab(5, "", "", "recent");
+            });
+        }
+        if (btnV142Close != null) {
+            btnV142Close.setOnClickListener(v -> dismissV142FeaturePopup());
+        }
 
         homeSwipe = findViewById(R.id.home_swipe);
         browseContainer = findViewById(R.id.browse_container);
@@ -439,7 +519,9 @@ public final class MainActivity extends AppCompatActivity {
         wlRv.setAdapter(myListWlAdapter);
 
         // Servers tab widgets
-        srvStatsSummary = findViewById(R.id.srv_stats_summary);
+        srvMetricTotal = findViewById(R.id.srv_metric_total);
+        srvMetricMovies = findViewById(R.id.srv_metric_movies);
+        srvMetricSeries = findViewById(R.id.srv_metric_series);
         srvStatsDups = findViewById(R.id.srv_stats_dups);
         srvStatsSources = findViewById(R.id.srv_stats_sources);
         srvSyncLabel = findViewById(R.id.srv_sync_label);
@@ -450,6 +532,10 @@ public final class MainActivity extends AppCompatActivity {
         srvLastSyncText = findViewById(R.id.srv_last_sync_text);
         switchAutoSync = findViewById(R.id.switch_auto_sync);
         spinAutoSyncInterval = findViewById(R.id.spin_auto_sync_interval);
+        srvListHeaderTitle = findViewById(R.id.srv_list_header_title);
+        srvListStatusStrip = findViewById(R.id.srv_list_status_strip);
+        btnSrvAddServer = findViewById(R.id.btn_srv_add_server);
+        btnSrvResetDefaults = findViewById(R.id.btn_srv_reset_defaults);
         btnSrvPingAll = findViewById(R.id.btn_srv_ping_all);
         srvHealthList = findViewById(R.id.srv_health_list);
         srvAppVersion = findViewById(R.id.srv_app_version);
@@ -457,6 +543,16 @@ public final class MainActivity extends AppCompatActivity {
         btnSrvDownloadUpdate = findViewById(R.id.btn_srv_download_update);
         srvUpdateStatus = findViewById(R.id.srv_update_status);
         srvUpdateNotes = findViewById(R.id.srv_update_notes);
+
+        // Mini-Player Drawer Bar widgets
+        miniPlayerBar = findViewById(R.id.mini_player_bar);
+        miniPlayerContent = findViewById(R.id.mini_player_content);
+        miniPlayerVideo = findViewById(R.id.mini_player_video);
+        miniPlayerProgress = findViewById(R.id.mini_player_progress);
+        miniPlayerTitle = findViewById(R.id.mini_player_title);
+        miniPlayerSub = findViewById(R.id.mini_player_sub);
+        btnMiniPlayPause = findViewById(R.id.btn_mini_play_pause);
+        btnMiniClose = findViewById(R.id.btn_mini_close);
 
         srvAppVersion.setText("V" + app.repository.updateService.getInstalledVersion()
                 + " (Code " + app.repository.updateService.getInstalledVersionCode() + ")");
@@ -474,9 +570,13 @@ public final class MainActivity extends AppCompatActivity {
         UiHelper.applyTvFocusEffect(btnClearCompletedDownloads, 1.05f);
         UiHelper.applyTvFocusEffect(btnSrvSyncQuick, 1.04f);
         UiHelper.applyTvFocusEffect(btnSrvSyncFull, 1.04f);
+        UiHelper.applyTvFocusEffect(btnSrvAddServer, 1.04f);
+        UiHelper.applyTvFocusEffect(btnSrvResetDefaults, 1.04f);
         UiHelper.applyTvFocusEffect(btnSrvPingAll, 1.05f);
         UiHelper.applyTvFocusEffect(btnSrvCheckUpdates, 1.03f);
         UiHelper.applyTvFocusEffect(btnSrvDownloadUpdate, 1.03f);
+        UiHelper.applyTvFocusEffect(btnMiniPlayPause, 1.08f);
+        UiHelper.applyTvFocusEffect(btnMiniClose, 1.08f);
         UiHelper.applyTvFocusEffect(topNavHome, 1.06f);
         UiHelper.applyTvFocusEffect(topNavMovies, 1.06f);
         UiHelper.applyTvFocusEffect(topNavSeries, 1.06f);
@@ -743,6 +843,8 @@ public final class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        btnSrvAddServer.setOnClickListener(v -> showAddServerDialog());
+        btnSrvResetDefaults.setOnClickListener(v -> confirmResetDefaultServers());
         btnSrvPingAll.setOnClickListener(v -> pingAllServersIntoTab());
 
         btnSrvCheckUpdates.setOnClickListener(v -> runManualUpdateCheck());
@@ -752,6 +854,64 @@ public final class MainActivity extends AppCompatActivity {
                 UiHelper.downloadAppUpdateDirect(this, availableUpdate);
             }
         });
+
+        miniPlayerContent.setOnClickListener(v -> expandMiniPlayerToFullscreen());
+        btnMiniPlayPause.setOnClickListener(v -> {
+            if (app.playbackManager != null) app.playbackManager.togglePlayPause();
+        });
+        btnMiniClose.setOnClickListener(v -> {
+            if (app.playbackManager != null) app.playbackManager.stopAndRelease();
+        });
+    }
+
+    private void updateMiniPlayerUi() {
+        if (miniPlayerBar == null || app.playbackManager == null) return;
+        PlaybackManager pm = app.playbackManager;
+        if (!pm.hasActiveSession() || pm.isFullscreenActive() || pm.isInPipMode()) {
+            hideMiniPlayerBar();
+            return;
+        }
+        miniPlayerBar.setVisibility(View.VISIBLE);
+        miniPlayerTitle.setText(pm.formatSessionTitle());
+        btnMiniPlayPause.setImageResource(pm.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
+        pm.attachPlayerView(miniPlayerVideo);
+        updateMiniPlayerProgress(pm.getCurrentPositionMs(), pm.getDurationMs());
+    }
+
+    private void updateMiniPlayerProgress(long posMs, long durMs) {
+        if (miniPlayerBar == null || miniPlayerBar.getVisibility() != View.VISIBLE || app.playbackManager == null) return;
+        PlaybackManager pm = app.playbackManager;
+        if (durMs > 0L) {
+            int p = (int) Math.max(0L, Math.min(1000L, (posMs * 1000L) / durMs));
+            miniPlayerProgress.setProgress(p);
+        } else {
+            miniPlayerProgress.setProgress(0);
+        }
+        String base = pm.formatSessionSubtitle();
+        String timePart = durMs > 0L
+                ? Models.formatDurationSec(posMs / 1000.0) + " / " + Models.formatDurationSec(durMs / 1000.0)
+                : (pm.isPlaying() ? "Playing" : "Paused");
+        miniPlayerSub.setText(base.isEmpty() ? timePart : (base + " · " + timePart));
+    }
+
+    private void hideMiniPlayerBar() {
+        if (app.playbackManager != null) {
+            app.playbackManager.detachPlayerView(miniPlayerVideo);
+        }
+        if (miniPlayerBar != null) {
+            miniPlayerBar.setVisibility(View.GONE);
+        }
+    }
+
+    private void expandMiniPlayerToFullscreen() {
+        if (app.playbackManager == null || !app.playbackManager.hasActiveSession()) {
+            hideMiniPlayerBar();
+            return;
+        }
+        app.playbackManager.detachPlayerView(miniPlayerVideo);
+        Intent i = new Intent(this, PlayerActivity.class);
+        i.putExtra(PlayerActivity.EXTRA_RESUME_ACTIVE, true);
+        startActivity(i);
     }
 
     private void setupBackNavigation() {
@@ -789,7 +949,10 @@ public final class MainActivity extends AppCompatActivity {
                             .setTitle("Exit CineVault?")
                             .setMessage("Are you sure you want to quit CineVault?")
                             .setNegativeButton("Cancel", null)
-                            .setPositiveButton("Quit", (d, w) -> finishAffinity())
+                            .setPositiveButton("Quit", (d, w) -> {
+                                if (app.playbackManager != null) app.playbackManager.stopAndRelease();
+                                finishAffinity();
+                            })
                             .show();
                 } else {
                     lastHomeBackPressMs = now;
@@ -1016,21 +1179,46 @@ public final class MainActivity extends AppCompatActivity {
         setSpinnerItems(spinLanguage, langLabels);
         spinLanguage.setSelection(Math.max(0, langValues.indexOf(currentFilter.language)), false);
 
-        // 6. Server Spinner
+        // 6. Server Spinner (dynamic active + custom servers)
         serverValues.clear();
         List<String> serverLabels = new ArrayList<>();
         serverValues.add(""); serverLabels.add("All Servers");
-        String[][] sOpts = {{"dhakaflix", "DhakaFlix"}, {"icc", "ICC FTP"}, {"circleftp", "CircleFTP"}, {"discoveryftp", "DiscoveryFTP"}};
-        for (String[] opt : sOpts) {
+
+        java.util.Map<String, String> dynamicSrvMap = new java.util.LinkedHashMap<>();
+        List<Models.ServerFilterOption> dynOpts = cachedServerFilterOptions;
+        if (dynOpts != null && !dynOpts.isEmpty()) {
+            for (Models.ServerFilterOption o : dynOpts) {
+                dynamicSrvMap.put(o.value, o.label);
+            }
+        } else {
+            dynamicSrvMap.put("dhakaflix", "DhakaFlix");
+            dynamicSrvMap.put("icc", "ICC FTP");
+            dynamicSrvMap.put("circleftp", "CircleFTP");
+            dynamicSrvMap.put("discoveryftp", "DiscoveryFTP");
+        }
+        if (facets != null) {
+            for (String srcKey : facets.sources.keySet()) {
+                if (!dynamicSrvMap.containsKey(srcKey)) {
+                    dynamicSrvMap.put(srcKey, ServerConfig.serverDisplayName(srcKey, ""));
+                }
+            }
+        }
+        if (!currentFilter.source.isEmpty() && !dynamicSrvMap.containsKey(currentFilter.source)) {
+            dynamicSrvMap.put(currentFilter.source, ServerConfig.serverDisplayName(currentFilter.source, ""));
+        }
+
+        for (java.util.Map.Entry<String, String> e : dynamicSrvMap.entrySet()) {
+            String key = e.getKey();
+            String lbl = e.getValue();
             if (facets != null) {
-                int sCnt = facets.sources.containsKey(opt[0]) ? facets.sources.get(opt[0]) : 0;
-                if (sCnt > 0 || opt[0].equals(currentFilter.source)) {
-                    serverValues.add(opt[0]);
-                    serverLabels.add(opt[1] + " (" + sCnt + ")");
+                int sCnt = facets.sources.containsKey(key) ? facets.sources.get(key) : 0;
+                if (sCnt > 0 || key.equals(currentFilter.source)) {
+                    serverValues.add(key);
+                    serverLabels.add(lbl + " (" + sCnt + ")");
                 }
             } else {
-                serverValues.add(opt[0]);
-                serverLabels.add(opt[1]);
+                serverValues.add(key);
+                serverLabels.add(lbl);
             }
         }
         setSpinnerItems(spinServer, serverLabels);
@@ -1135,7 +1323,16 @@ public final class MainActivity extends AppCompatActivity {
     private void loadHome(boolean initialBootstrap) {
         app.ioExecutor.execute(() -> {
             Models.HomeFeed feed = app.repository.loadHomeFeed();
+            cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+            boolean iccEnabled = false;
+            boolean hasAnyEnabledServer = false;
+            for (Models.ManagedServer s : app.repository.db.getEnabledServers()) {
+                hasAnyEnabledServer = true;
+                if ("icc".equals(s.adapter)) iccEnabled = true;
+            }
             boolean shouldAutoSync = initialBootstrap && feed.stats.total > 0 && app.repository.isAutoSyncDue();
+            final boolean finalIccEnabled = iccEnabled;
+            final boolean finalHasAnyEnabled = hasAnyEnabledServer;
             uiHandler.post(() -> {
                 homeFeed = feed;
                 latestStats = feed.stats;
@@ -1160,11 +1357,11 @@ public final class MainActivity extends AppCompatActivity {
                     }
                 }
 
-                if (initialBootstrap) {
+                if (initialBootstrap && finalHasAnyEnabled) {
                     int iccCount = feed.stats.bySource.containsKey("icc") ? feed.stats.bySource.get("icc") : 0;
                     if (feed.stats.total == 0) {
                         triggerSync("full", false);
-                    } else if (iccCount < 500) {
+                    } else if (finalIccEnabled && iccCount < 500) {
                         uiHandler.postDelayed(() -> triggerSync("full", true), 2500L);
                     } else if (shouldAutoSync || app.repository.isAutoSyncEnabled()) {
                         uiHandler.postDelayed(() -> triggerSync("quick", true), 3500L);
@@ -1452,20 +1649,44 @@ public final class MainActivity extends AppCompatActivity {
     private void loadServersTab(boolean triggerPing) {
         app.ioExecutor.execute(() -> {
             Models.LibraryStats st = app.repository.db.getLibraryStats(false);
+            cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+            List<Models.ManagedServer> allServers = app.repository.db.getAllServers();
             boolean autoEnabled = app.repository.isAutoSyncEnabled();
             int intervalMin = app.repository.getAutoSyncIntervalMinutes();
+
+            // Merge persisted server list with latest live ping statuses
+            java.util.Map<String, Models.ServerHealth> lastById = new java.util.HashMap<>();
+            for (Models.ServerHealth h : app.repository.getLastServerHealth()) {
+                if (h != null && h.node != null) lastById.put(h.node.id, h);
+            }
+            List<Models.ServerHealth> merged = new ArrayList<>();
+            for (Models.ManagedServer srv : allServers) {
+                Models.ServerHealth prev = lastById.get(srv.id);
+                if (!srv.enabled) {
+                    merged.add(new Models.ServerHealth(srv.toServerNode(), false, null, "Disabled", srv));
+                } else if (prev != null) {
+                    merged.add(new Models.ServerHealth(srv.toServerNode(), prev.online, prev.latencyMs, prev.reason, srv));
+                } else {
+                    merged.add(new Models.ServerHealth(srv.toServerNode(), false, null, "Not pinged yet", srv));
+                }
+            }
 
             uiHandler.post(() -> {
                 latestStats = st;
                 updateSyncChipCount();
-                srvStatsSummary.setText(st.total + " Unique Titles · " + st.movies + " Movies · " + st.series + " TV & Anime");
-                srvStatsDups.setText("Duplicates merged (highest quality kept): " + st.duplicatesMerged
-                        + " (from " + st.totalRaw + " indexed)");
-                int df = st.bySource.containsKey("dhakaflix") ? st.bySource.get("dhakaflix") : 0;
-                int ic = st.bySource.containsKey("icc") ? st.bySource.get("icc") : 0;
-                int cf = st.bySource.containsKey("circleftp") ? st.bySource.get("circleftp") : 0;
-                int ds = st.bySource.containsKey("discoveryftp") ? st.bySource.get("discoveryftp") : 0;
-                srvStatsSources.setText("DhakaFlix: " + df + " · ICC FTP: " + ic + " · CircleFTP: " + cf + " · DiscoveryFTP: " + ds);
+                if (srvMetricTotal != null) srvMetricTotal.setText(String.format(Locale.US, "%,d", st.total));
+                if (srvMetricMovies != null) srvMetricMovies.setText(String.format(Locale.US, "%,d", st.movies));
+                if (srvMetricSeries != null) srvMetricSeries.setText(String.format(Locale.US, "%,d", st.series));
+                srvStatsDups.setText(String.format(Locale.US, "Duplicates merged (highest quality kept): %,d (from %,d active)",
+                        st.duplicatesMerged, st.totalRaw));
+                List<String> srcParts = new ArrayList<>();
+                for (java.util.Map.Entry<String, Integer> e : st.bySource.entrySet()) {
+                    if (e.getValue() != null && e.getValue() > 0) {
+                        srcParts.add(String.format(Locale.US, "%s: %,d",
+                                ServerConfig.serverDisplayName(e.getKey(), ""), e.getValue()));
+                    }
+                }
+                srvStatsSources.setText(srcParts.isEmpty() ? "No active titles visible" : String.join(" · ", srcParts));
 
                 if (st.lastSync != null && st.lastSync > 0) {
                     SimpleDateFormat sdf = new SimpleDateFormat("MMM d, hh:mm a", Locale.US);
@@ -1484,6 +1705,7 @@ public final class MainActivity extends AppCompatActivity {
                 suppressAutoSyncUiEvents = false;
 
                 renderServersSyncProgress(app.repository.getSyncProgress());
+                renderServersHealthList(merged);
                 if (availableUpdate != null) renderUpdateCard(availableUpdate);
                 if (triggerPing) pingAllServersIntoTab();
             });
@@ -1543,57 +1765,619 @@ public final class MainActivity extends AppCompatActivity {
 
     private void renderServersHealthList(List<Models.ServerHealth> health) {
         srvHealthList.removeAllViews();
+        int total = health != null ? health.size() : 0;
+        int enabledCount = 0;
+        int onlineCount = 0;
+        int hiddenCount = 0;
+        if (health != null) {
+            for (Models.ServerHealth h : health) {
+                boolean en = h.managedServer == null || h.managedServer.enabled;
+                if (en) {
+                    enabledCount++;
+                    if (h.online) onlineCount++;
+                } else {
+                    hiddenCount++;
+                }
+            }
+        }
+        if (srvListHeaderTitle != null) {
+            srvListHeaderTitle.setText("Connected FTP Servers (" + enabledCount + "/" + total + ")");
+        }
+        if (srvListStatusStrip != null) {
+            String strip = onlineCount + " Online · " + enabledCount + " Active";
+            if (hiddenCount > 0) strip += " · " + hiddenCount + " Hidden";
+            srvListStatusStrip.setText(strip);
+        }
         if (health == null || health.isEmpty()) {
             TextView tv = new TextView(this);
-            tv.setText("Tap Ping All to test all 10 BDIX media servers.");
+            tv.setText("No servers configured. Tap + Add Server or Defaults above to connect FTP servers.");
             tv.setTextColor(0xFF94A3B8);
-            tv.setTextSize(12f);
+            tv.setTextSize(12.5f);
+            tv.setPadding(0, UiHelper.dp(this, 8), 0, UiHelper.dp(this, 8));
             srvHealthList.addView(tv);
             return;
         }
+        boolean syncRunning = app.repository.getSyncProgress().running;
         for (Models.ServerHealth h : health) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(0, UiHelper.dp(this, 6), 0, UiHelper.dp(this, 6));
+            final Models.ManagedServer srv = h.managedServer;
+            final boolean isEnabled = srv == null || srv.enabled;
+            final boolean isCustom = srv != null && !srv.isBuiltin;
+            final int itemCount = srv != null ? srv.itemCount : 0;
+            int customFolderCount = 0;
+            if (isCustom && srv.foldersJson != null && !srv.foldersJson.isEmpty()) {
+                try { customFolderCount = new org.json.JSONArray(srv.foldersJson).length(); } catch (Exception ignored) {}
+            }
+
+            final int accentColor = !isEnabled ? 0xFF475569
+                    : (h.online ? 0xFF22C55E : ("Not pinged yet".equals(h.reason) ? 0xFF38BDF8
+                    : (h.node.optional ? 0xFFF59E0B : 0xFFEF4444)));
+            final int pillBgColor = !isEnabled ? 0x2294A3B8
+                    : (h.online ? 0x2222C55E : ("Not pinged yet".equals(h.reason) ? 0x2238BDF8
+                    : (h.node.optional ? 0x22F59E0B : 0x24EF4444)));
+
+            // Outer horizontal card wrapper with left colored status accent bar
+            LinearLayout cardWrap = new LinearLayout(this);
+            cardWrap.setOrientation(LinearLayout.HORIZONTAL);
+            cardWrap.setBackground(UiHelper.outlineBoxDrawable(isEnabled ? 0x22FFFFFF : 0x14FFFFFF, 0xFF0B111E));
+            cardWrap.setAlpha(isEnabled ? 1f : 0.72f);
+            LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            wlp.bottomMargin = UiHelper.dp(this, 10);
+            cardWrap.setLayoutParams(wlp);
+
+            View accentBar = new View(this);
+            accentBar.setBackgroundColor(accentColor);
+            accentBar.setLayoutParams(new LinearLayout.LayoutParams(
+                    UiHelper.dp(this, 4), LinearLayout.LayoutParams.MATCH_PARENT));
+            cardWrap.addView(accentBar);
+
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            int pad = UiHelper.dp(this, 11);
+            card.setPadding(pad, pad, pad, UiHelper.dp(this, 9));
+            card.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            cardWrap.addView(card);
+
+            // Top row: Name + Custom tag + tinted Status Pill
+            LinearLayout topRow = new LinearLayout(this);
+            topRow.setOrientation(LinearLayout.HORIZONTAL);
+            topRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
 
             LinearLayout left = new LinearLayout(this);
             left.setOrientation(LinearLayout.VERTICAL);
             left.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
             TextView name = new TextView(this);
-            name.setText(h.node.name);
+            name.setText(isCustom ? (h.node.name + "  ·  CUSTOM") : h.node.name);
             name.setTextColor(0xFFF3F6FC);
-            name.setTextSize(12.5f);
+            name.setTextSize(13.5f);
+            name.setTypeface(null, android.graphics.Typeface.BOLD);
             name.setMaxLines(1);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             left.addView(name);
 
-            TextView sub = new TextView(this);
-            String subTxt = h.node.origin + (!h.online && h.reason != null && !h.reason.isEmpty() ? " · " + h.reason : "");
-            sub.setText(subTxt);
-            sub.setTextColor(0xFF64748B);
-            sub.setTextSize(11f);
-            sub.setMaxLines(2);
-            left.addView(sub);
+            TextView urlTv = new TextView(this);
+            StringBuilder urlSb = new StringBuilder(h.node.origin);
+            if (h.node.rootHref != null && !"/".equals(h.node.rootHref)) {
+                urlSb.append(com.cinevault.app.data.MediaParser.safeDecode(h.node.rootHref));
+            }
+            urlTv.setText(urlSb.toString());
+            urlTv.setTextColor(0xFF64748B);
+            urlTv.setTextSize(11f);
+            urlTv.setMaxLines(1);
+            urlTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            left.addView(urlTv);
 
-            TextView status = new TextView(this);
-            status.setTextSize(11.5f);
-            status.setTypeface(null, android.graphics.Typeface.BOLD);
-            status.setPadding(UiHelper.dp(this, 8), 0, 0, 0);
-            if (h.online) {
-                status.setText((h.latencyMs != null ? h.latencyMs : 0) + "ms OK");
-                status.setTextColor(0xFF22C55E);
+            TextView statusPill = new TextView(this);
+            statusPill.setTextSize(11f);
+            statusPill.setTypeface(null, android.graphics.Typeface.BOLD);
+            statusPill.setPadding(UiHelper.dp(this, 8), UiHelper.dp(this, 3), UiHelper.dp(this, 8), UiHelper.dp(this, 3));
+            android.graphics.drawable.GradientDrawable pillBg = new android.graphics.drawable.GradientDrawable();
+            pillBg.setColor(pillBgColor);
+            pillBg.setCornerRadius(UiHelper.dp(this, 99));
+            statusPill.setBackground(pillBg);
+            LinearLayout.LayoutParams splp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            splp.leftMargin = UiHelper.dp(this, 8);
+            statusPill.setLayoutParams(splp);
+
+            if (!isEnabled) {
+                statusPill.setText("Hidden");
+                statusPill.setTextColor(0xFF94A3B8);
+            } else if (h.online) {
+                statusPill.setText((h.latencyMs != null ? h.latencyMs : 0) + "ms");
+                statusPill.setTextColor(0xFF22C55E);
+            } else if ("Not pinged yet".equals(h.reason)) {
+                statusPill.setText("Active");
+                statusPill.setTextColor(0xFF38BDF8);
             } else if (h.node.optional) {
-                status.setText("Upstream Down");
-                status.setTextColor(0xFFF59E0B);
+                statusPill.setText("Upstream");
+                statusPill.setTextColor(0xFFF59E0B);
             } else {
-                status.setText("Offline");
-                status.setTextColor(0xFFEF4444);
+                statusPill.setText("Offline");
+                statusPill.setTextColor(0xFFFCA5A5);
             }
 
-            row.addView(left);
-            row.addView(status);
-            srvHealthList.addView(row);
+            topRow.addView(left);
+            topRow.addView(statusPill);
+            card.addView(topRow);
+
+            // Middle metadata line (indexed count, custom folder count, hidden/error note)
+            List<String> metaParts = new ArrayList<>();
+            if (itemCount > 0) metaParts.add(String.format(Locale.US, "%,d indexed", itemCount));
+            if (customFolderCount > 0) metaParts.add(customFolderCount + " folder" + (customFolderCount == 1 ? "" : "s"));
+            if (!isEnabled) metaParts.add("Files hidden from library");
+            else if (!h.online && h.reason != null && !h.reason.isEmpty() && !"Not pinged yet".equals(h.reason)) {
+                metaParts.add(h.reason);
+            }
+            if (!metaParts.isEmpty()) {
+                TextView metaTv = new TextView(this);
+                metaTv.setText(String.join(" · ", metaParts));
+                metaTv.setTextColor(isEnabled ? 0xFF94A3B8 : 0xFF64748B);
+                metaTv.setTextSize(11.2f);
+                metaTv.setPadding(0, UiHelper.dp(this, 5), 0, 0);
+                card.addView(metaTv);
+            }
+
+            if (srv != null) {
+                View div = new View(this);
+                div.setBackgroundColor(0x14FFFFFF);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, UiHelper.dp(this, 1));
+                dlp.topMargin = UiHelper.dp(this, 8);
+                dlp.bottomMargin = UiHelper.dp(this, 4);
+                div.setLayoutParams(dlp);
+                card.addView(div);
+
+                LinearLayout actionRow = new LinearLayout(this);
+                actionRow.setOrientation(LinearLayout.HORIZONTAL);
+                actionRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+                MaterialSwitch toggle = new MaterialSwitch(this);
+                toggle.setChecked(srv.enabled);
+                toggle.setText(srv.enabled ? "Visible" : "Hidden");
+                toggle.setTextColor(srv.enabled ? 0xFFCBD5E1 : 0xFF64748B);
+                toggle.setTextSize(11.5f);
+                toggle.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                toggle.setOnCheckedChangeListener((bw, checked) -> {
+                    toggle.setEnabled(false);
+                    app.ioExecutor.execute(() -> {
+                        app.repository.db.setServerEnabled(srv.id, checked);
+                        cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                        uiHandler.post(() -> {
+                            Toast.makeText(MainActivity.this,
+                                    srv.name + (checked ? " enabled — files visible" : " disabled — files hidden"),
+                                    Toast.LENGTH_SHORT).show();
+                            loadHome(false);
+                            loadServersTab(false);
+                        });
+                    });
+                });
+                actionRow.addView(toggle);
+
+                if (srv.enabled) {
+                    MaterialButton syncBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+                    syncBtn.setText("Sync");
+                    syncBtn.setAllCaps(false);
+                    syncBtn.setTextSize(11.5f);
+                    syncBtn.setTextColor(0xFF38BDF8);
+                    syncBtn.setEnabled(!syncRunning);
+                    LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 34));
+                    slp.rightMargin = UiHelper.dp(this, 6);
+                    syncBtn.setLayoutParams(slp);
+                    syncBtn.setOnClickListener(v -> triggerSyncForServer(srv));
+                    UiHelper.applyTvFocusEffect(syncBtn, 1.05f);
+                    actionRow.addView(syncBtn);
+                }
+
+                MaterialButton delBtn = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+                delBtn.setText("Remove");
+                delBtn.setAllCaps(false);
+                delBtn.setTextSize(11.5f);
+                delBtn.setTextColor(0xFFFCA5A5);
+                delBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, UiHelper.dp(this, 34)));
+                delBtn.setOnClickListener(v -> confirmDeleteServer(srv));
+                UiHelper.applyTvFocusEffect(delBtn, 1.05f);
+                actionRow.addView(delBtn);
+
+                card.addView(actionRow);
+            }
+
+            srvHealthList.addView(cardWrap);
         }
+    }
+
+    private void triggerSyncForServer(Models.ManagedServer srv) {
+        Toast.makeText(this, "Syncing " + srv.name + "...", Toast.LENGTH_SHORT).show();
+        app.ioExecutor.execute(() -> app.repository.runSync("full", false, srv.id,
+                () -> uiHandler.post(this::refreshVisibleTabAfterSync)));
+    }
+
+    private void confirmDeleteServer(Models.ManagedServer srv) {
+        new AlertDialog.Builder(this)
+                .setTitle("Remove \"" + srv.name + "\"?")
+                .setMessage("This removes the server from your list and deletes its indexed titles ("
+                        + srv.itemCount + " items). Surviving mirrors on other servers stay intact. You can re-add it or restore defaults anytime.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Remove", (d, w) -> app.ioExecutor.execute(() -> {
+                    int deleted = app.repository.db.deleteServerAndPurgeMedia(srv.id);
+                    cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                    uiHandler.post(() -> {
+                        Toast.makeText(MainActivity.this,
+                                deleted > 0
+                                        ? "Removed " + srv.name + " & cleaned " + deleted + " items"
+                                        : "Removed " + srv.name,
+                                Toast.LENGTH_SHORT).show();
+                        loadHome(false);
+                        loadServersTab(false);
+                    });
+                }))
+                .show();
+    }
+
+    private void confirmResetDefaultServers() {
+        new AlertDialog.Builder(this)
+                .setTitle("Restore Default FTP Servers?")
+                .setMessage("Re-adds and enables all built-in DhakaFlix, ICC FTP, CircleFTP, and DiscoveryFTP servers. Your custom added servers will be kept.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Restore Defaults", (d, w) -> app.ioExecutor.execute(() -> {
+                    app.repository.db.resetDefaultServers();
+                    cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                    uiHandler.post(() -> {
+                        Toast.makeText(MainActivity.this, "Default FTP servers restored & visible", Toast.LENGTH_SHORT).show();
+                        loadHome(false);
+                        loadServersTab(true);
+                    });
+                }))
+                .show();
+    }
+
+    private void showAddServerDialog() {
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = UiHelper.dp(this, 18);
+        root.setPadding(pad, UiHelper.dp(this, 10), pad, UiHelper.dp(this, 10));
+        scroll.addView(root);
+
+        TextView intro = new TextView(this);
+        intro.setText("Paste any FTP URL playable on your Wi-Fi (h5ai, Apache, Nginx, Caddy, or BDIX portal). CineVault automatically detects all compatible movie & series folders and merges them into your library.");
+        intro.setTextColor(0xFF94A3B8);
+        intro.setTextSize(12f);
+        intro.setPadding(0, 0, 0, UiHelper.dp(this, 10));
+        root.addView(intro);
+
+        TextView lblUrl = new TextView(this);
+        lblUrl.setText("FTP Server URL");
+        lblUrl.setTextColor(0xFFCBD5E1);
+        lblUrl.setTextSize(12f);
+        lblUrl.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(lblUrl);
+
+        EditText etUrl = new EditText(this);
+        etUrl.setHint("http://172.16.50.14/ or ftp.myisp.net/movies/");
+        etUrl.setSingleLine(true);
+        etUrl.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        etUrl.setTextColor(0xFFF3F6FC);
+        etUrl.setHintTextColor(0xFF64748B);
+        etUrl.setTextSize(13f);
+        etUrl.setBackgroundResource(R.drawable.bg_input_box);
+        etUrl.setPadding(UiHelper.dp(this, 12), UiHelper.dp(this, 10), UiHelper.dp(this, 12), UiHelper.dp(this, 10));
+        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        ulp.topMargin = UiHelper.dp(this, 4);
+        etUrl.setLayoutParams(ulp);
+        root.addView(etUrl);
+
+        TextView lblName = new TextView(this);
+        lblName.setText("Display Name (optional — auto-detected)");
+        lblName.setTextColor(0xFFCBD5E1);
+        lblName.setTextSize(12f);
+        lblName.setTypeface(null, android.graphics.Typeface.BOLD);
+        lblName.setPadding(0, UiHelper.dp(this, 10), 0, 0);
+        root.addView(lblName);
+
+        EditText etName = new EditText(this);
+        etName.setHint("Auto from server");
+        etName.setSingleLine(true);
+        etName.setTextColor(0xFFF3F6FC);
+        etName.setHintTextColor(0xFF64748B);
+        etName.setTextSize(13f);
+        etName.setBackgroundResource(R.drawable.bg_input_box);
+        etName.setPadding(UiHelper.dp(this, 12), UiHelper.dp(this, 10), UiHelper.dp(this, 12), UiHelper.dp(this, 10));
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = UiHelper.dp(this, 4);
+        etName.setLayoutParams(nlp);
+        root.addView(etName);
+
+        MaterialButton btnTest = new MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+        btnTest.setText("Auto-Detect Compatible Folders");
+        btnTest.setAllCaps(false);
+        btnTest.setTextColor(0xFF38BDF8);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, UiHelper.dp(this, 42));
+        tlp.topMargin = UiHelper.dp(this, 12);
+        btnTest.setLayoutParams(tlp);
+        root.addView(btnTest);
+
+        ProgressBar probeSpinner = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        probeSpinner.setIndeterminate(true);
+        probeSpinner.setVisibility(View.GONE);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, UiHelper.dp(this, 6));
+        plp.topMargin = UiHelper.dp(this, 6);
+        probeSpinner.setLayoutParams(plp);
+        root.addView(probeSpinner);
+
+        TextView tvProbeStatus = new TextView(this);
+        tvProbeStatus.setTextSize(12f);
+        tvProbeStatus.setPadding(0, UiHelper.dp(this, 6), 0, UiHelper.dp(this, 4));
+        tvProbeStatus.setVisibility(View.GONE);
+        root.addView(tvProbeStatus);
+
+        LinearLayout quickBar = new LinearLayout(this);
+        quickBar.setOrientation(LinearLayout.HORIZONTAL);
+        quickBar.setVisibility(View.GONE);
+        quickBar.setPadding(0, UiHelper.dp(this, 4), 0, UiHelper.dp(this, 6));
+        root.addView(quickBar);
+
+        LinearLayout foldersBox = new LinearLayout(this);
+        foldersBox.setOrientation(LinearLayout.VERTICAL);
+        root.addView(foldersBox);
+
+        final List<Models.DiscoveredFolder> discovered = new ArrayList<>();
+        final List<android.widget.CheckBox> folderBoxes = new ArrayList<>();
+        final boolean[] hasProbed = {false};
+        final String[] detectedAdapter = {"directory"};
+        final String[] detectedOrigin = {null};
+        final String[] detectedRootHref = {null};
+
+        etUrl.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (hasProbed[0]) {
+                    hasProbed[0] = false;
+                    detectedAdapter[0] = "directory";
+                    detectedOrigin[0] = null;
+                    detectedRootHref[0] = null;
+                    discovered.clear();
+                    foldersBox.removeAllViews();
+                    quickBar.setVisibility(View.GONE);
+                }
+            }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        });
+
+        Runnable renderFolderRows = () -> {
+            foldersBox.removeAllViews();
+            folderBoxes.clear();
+            for (Models.DiscoveredFolder f : discovered) {
+                LinearLayout fCard = new LinearLayout(MainActivity.this);
+                fCard.setOrientation(LinearLayout.HORIZONTAL);
+                fCard.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                fCard.setPadding(UiHelper.dp(MainActivity.this, 8), UiHelper.dp(MainActivity.this, 6),
+                        UiHelper.dp(MainActivity.this, 10), UiHelper.dp(MainActivity.this, 6));
+                fCard.setBackground(UiHelper.outlineBoxDrawable(f.selected ? 0x4438BDF8 : 0x1AFFFFFF, 0xFF0A0F1D));
+                LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                flp.bottomMargin = UiHelper.dp(MainActivity.this, 6);
+                fCard.setLayoutParams(flp);
+
+                android.widget.CheckBox cb = new android.widget.CheckBox(MainActivity.this);
+                cb.setChecked(f.selected);
+                fCard.addView(cb);
+                folderBoxes.add(cb);
+
+                LinearLayout txtCol = new LinearLayout(MainActivity.this);
+                txtCol.setOrientation(LinearLayout.VERTICAL);
+                txtCol.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+                TextView tvN = new TextView(MainActivity.this);
+                tvN.setText(f.name);
+                tvN.setTextColor(0xFFF3F6FC);
+                tvN.setTextSize(12.5f);
+                tvN.setTypeface(null, android.graphics.Typeface.BOLD);
+                tvN.setMaxLines(1);
+                tvN.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                txtCol.addView(tvN);
+
+                TextView tvMeta = new TextView(MainActivity.this);
+                String modeStr = "bucketed".equals(f.mode) ? "Year/A-Z buckets" : "Direct titles";
+                if (f.childCount > 0) modeStr += " · " + f.childCount + " entries";
+                tvMeta.setText(modeStr);
+                tvMeta.setTextColor(0xFF64748B);
+                tvMeta.setTextSize(10.5f);
+                txtCol.addView(tvMeta);
+                fCard.addView(txtCol);
+
+                ServerConfig.CategoryDef catDef = ServerConfig.CATEGORY_BY_ID.get(f.category);
+                String catLbl = catDef != null ? catDef.shortLabel : f.category;
+                TextView tvCat = new TextView(MainActivity.this);
+                tvCat.setText(catLbl);
+                tvCat.setTextColor(0xFF38BDF8);
+                tvCat.setTextSize(10.5f);
+                tvCat.setTypeface(null, android.graphics.Typeface.BOLD);
+                tvCat.setPadding(UiHelper.dp(MainActivity.this, 7), UiHelper.dp(MainActivity.this, 2),
+                        UiHelper.dp(MainActivity.this, 7), UiHelper.dp(MainActivity.this, 2));
+                android.graphics.drawable.GradientDrawable catBg = new android.graphics.drawable.GradientDrawable();
+                catBg.setColor(0x2238BDF8);
+                catBg.setCornerRadius(UiHelper.dp(MainActivity.this, 99));
+                tvCat.setBackground(catBg);
+                fCard.addView(tvCat);
+
+                cb.setOnCheckedChangeListener((b, chk) -> {
+                    f.selected = chk;
+                    fCard.setBackground(UiHelper.outlineBoxDrawable(chk ? 0x4438BDF8 : 0x1AFFFFFF, 0xFF0A0F1D));
+                });
+                fCard.setOnClickListener(v2 -> cb.setChecked(!cb.isChecked()));
+                foldersBox.addView(fCard);
+            }
+        };
+
+        // Quick selection pills
+        String[] quickTitles = {"Compatible Only", "Select All", "Clear"};
+        for (int qi = 0; qi < quickTitles.length; qi++) {
+            final int mode = qi;
+            TextView qBtn = new TextView(this);
+            qBtn.setText(quickTitles[qi]);
+            qBtn.setTextColor(0xFFCBD5E1);
+            qBtn.setTextSize(11f);
+            qBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            qBtn.setPadding(UiHelper.dp(this, 10), UiHelper.dp(this, 5), UiHelper.dp(this, 10), UiHelper.dp(this, 5));
+            qBtn.setBackground(UiHelper.outlineBoxDrawable(0x22FFFFFF, 0xFF141C2E));
+            LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            qlp.rightMargin = UiHelper.dp(this, 6);
+            qBtn.setLayoutParams(qlp);
+            qBtn.setOnClickListener(v -> {
+                for (int i = 0; i < discovered.size(); i++) {
+                    Models.DiscoveredFolder f = discovered.get(i);
+                    boolean next = mode == 1 || (mode == 0 && !H5aiService.classifyDiscoveredFolder(f.name).skipDefault);
+                    f.selected = next;
+                    if (i < folderBoxes.size()) folderBoxes.get(i).setChecked(next);
+                }
+            });
+            quickBar.addView(qBtn);
+        }
+
+        btnTest.setOnClickListener(v -> {
+            String rawUrl = ServerConfig.normalizeServerInputUrl(etUrl.getText().toString());
+            if (!ServerConfig.isSafeServerUrl(rawUrl)) {
+                tvProbeStatus.setVisibility(View.VISIBLE);
+                tvProbeStatus.setTextColor(0xFFFCA5A5);
+                tvProbeStatus.setText("Enter a valid FTP server URL (loopback addresses blocked).");
+                return;
+            }
+            btnTest.setEnabled(false);
+            btnTest.setText("Scanning Folders...");
+            probeSpinner.setVisibility(View.VISIBLE);
+            tvProbeStatus.setVisibility(View.VISIBLE);
+            tvProbeStatus.setTextColor(0xFF38BDF8);
+            tvProbeStatus.setText("Recursively discovering compatible movie & series folders...");
+            foldersBox.removeAllViews();
+            quickBar.setVisibility(View.GONE);
+            discovered.clear();
+
+            app.ioExecutor.execute(() -> {
+                Models.ProbeResult res = app.repository.h5ai.probeDirectoryServer(rawUrl, 8500);
+                uiHandler.post(() -> {
+                    btnTest.setEnabled(true);
+                    btnTest.setText("Auto-Detect Compatible Folders");
+                    probeSpinner.setVisibility(View.GONE);
+                    if (!res.ok) {
+                        tvProbeStatus.setTextColor(0xFFFCA5A5);
+                        tvProbeStatus.setText("Error: " + (res.error != null ? res.error : "Unreachable"));
+                        return;
+                    }
+                    hasProbed[0] = true;
+                    detectedAdapter[0] = (res.detectedAdapter != null && !res.detectedAdapter.isEmpty())
+                            ? res.detectedAdapter : "directory";
+                    detectedOrigin[0] = (res.origin != null && !res.origin.isEmpty()) ? res.origin : null;
+                    detectedRootHref[0] = res.rootHref;
+                    if (etName.getText().toString().trim().isEmpty()) {
+                        if (res.suggestedName != null && !res.suggestedName.trim().isEmpty()) {
+                            etName.setText(res.suggestedName.trim());
+                        } else if (!res.origin.isEmpty()) {
+                            try { etName.setText(new java.net.URL(res.origin).getHost()); } catch (Exception ignored) {}
+                        }
+                    }
+                    int compat = 0;
+                    for (Models.DiscoveredFolder f : res.folders) if (f.selected) compat++;
+                    tvProbeStatus.setTextColor(0xFF22C55E);
+                    tvProbeStatus.setText("Reachable (" + res.protocol.toUpperCase(Locale.US) + ") · "
+                            + res.latencyMs + "ms · " + compat + " compatible / " + res.folders.size() + " folders"
+                            + (res.directVideoCount > 0 ? " · " + res.directVideoCount + " videos" : ""));
+                    discovered.addAll(res.folders);
+                    if (!discovered.isEmpty()) {
+                        quickBar.setVisibility(View.VISIBLE);
+                        renderFolderRows.run();
+                    }
+                });
+            });
+        });
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Add Custom FTP Server")
+                .setView(scroll)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Add & Auto-Sync", null)
+                .create();
+
+        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String rawUrl = ServerConfig.normalizeServerInputUrl(etUrl.getText().toString());
+            if (!ServerConfig.isSafeServerUrl(rawUrl)) {
+                tvProbeStatus.setVisibility(View.VISIBLE);
+                tvProbeStatus.setTextColor(0xFFFCA5A5);
+                tvProbeStatus.setText("Enter a valid FTP server URL first.");
+                return;
+            }
+            final String initialName = etName.getText().toString().trim();
+            final String initialAdapter = detectedAdapter[0];
+            final String initialOrigin = detectedOrigin[0];
+            final String initialRootHref = detectedRootHref[0];
+            final List<Models.DiscoveredFolder> preSelected = new ArrayList<>();
+            for (Models.DiscoveredFolder f : discovered) {
+                if (f.selected) preSelected.add(f);
+            }
+            final boolean needAutoDiscover = !hasProbed[0];
+
+            dlg.dismiss();
+            if (needAutoDiscover) {
+                Toast.makeText(MainActivity.this, "Auto-detecting server & compatible folders...", Toast.LENGTH_SHORT).show();
+            }
+            app.ioExecutor.execute(() -> {
+                try {
+                    String finalAdapter = initialAdapter;
+                    String finalUrl = (initialOrigin != null && initialRootHref != null)
+                            ? (initialOrigin + initialRootHref) : rawUrl;
+                    String finalRootHref = initialRootHref;
+                    String finalName = initialName;
+                    List<Models.DiscoveredFolder> finalFolders = preSelected;
+                    if (needAutoDiscover) {
+                        Models.ProbeResult auto = app.repository.h5ai.probeDirectoryServer(rawUrl, 8000);
+                        if (auto.ok) {
+                            if (auto.detectedAdapter != null && !auto.detectedAdapter.isEmpty()) {
+                                finalAdapter = auto.detectedAdapter;
+                            }
+                            if (auto.origin != null && !auto.origin.isEmpty()) {
+                                finalUrl = auto.origin + (auto.rootHref != null ? auto.rootHref : "/");
+                            }
+                            if (auto.rootHref != null && !auto.rootHref.isEmpty()) {
+                                finalRootHref = auto.rootHref;
+                            }
+                            if (finalName.isEmpty() && auto.suggestedName != null && !auto.suggestedName.trim().isEmpty()) {
+                                finalName = auto.suggestedName.trim();
+                            }
+                            List<Models.DiscoveredFolder> compat = new ArrayList<>();
+                            for (Models.DiscoveredFolder f : auto.folders) {
+                                if (f.selected) compat.add(f);
+                            }
+                            finalFolders = compat;
+                        }
+                    }
+                    Models.ManagedServer saved = app.repository.db.addOrUpdateCustomServer(
+                            null, finalName, finalUrl, finalAdapter, finalFolders, finalRootHref);
+                    cachedServerFilterOptions = app.repository.db.getServerFilterOptions();
+                    int fCnt = finalFolders.size();
+                    uiHandler.post(() -> {
+                        Toast.makeText(MainActivity.this,
+                                fCnt > 0
+                                        ? "Added \"" + saved.name + "\" (" + fCnt + " folders auto-detected) — syncing..."
+                                        : "Added \"" + saved.name + "\" — syncing...",
+                                Toast.LENGTH_SHORT).show();
+                        loadServersTab(false);
+                        triggerSyncForServer(saved);
+                    });
+                } catch (Exception e) {
+                    uiHandler.post(() -> Toast.makeText(MainActivity.this,
+                            "Save failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                }
+            });
+        }));
+        dlg.show();
     }
 
     private void renderUpdateCard(Models.AppUpdateInfo info) {
@@ -1712,6 +2496,78 @@ public final class MainActivity extends AppCompatActivity {
                 });
             }
         });
+    }
+
+    /**
+     * Strictly V1.4.2-only one-time 5-second feature popup highlighting automatic FTP Server Adding.
+     * Persists immediately in SharedPreferences + SQLite so re-entering never shows it again,
+     * and version-gated to V1.4.2 only so future updates never trigger it.
+     */
+    private void maybeShowOneTimeV142ServerFeaturePopup() {
+        if (v142FeaturePopup == null) return;
+        final String installedVer = app.repository.updateService.getInstalledVersion();
+        android.content.SharedPreferences prefs = getSharedPreferences("cinevault_one_time_popups", MODE_PRIVATE);
+        boolean seenInPrefs = prefs.getBoolean(UpdateService.V142_FEATURE_POPUP_PREF_KEY, false);
+        if (!UpdateService.shouldShowV142ServerFeaturePopup(installedVer, seenInPrefs)) {
+            return;
+        }
+        app.ioExecutor.execute(() -> {
+            String seenInDb = app.repository.db.getSyncState(UpdateService.V142_FEATURE_POPUP_PREF_KEY);
+            boolean alreadySeen = "1".equals(seenInDb) || prefs.getBoolean(UpdateService.V142_FEATURE_POPUP_PREF_KEY, false);
+            if (!UpdateService.shouldShowV142ServerFeaturePopup(installedVer, alreadySeen)) {
+                return;
+            }
+            // Mark as shown IMMEDIATELY before displaying so further entering will NEVER show it again!
+            prefs.edit().putBoolean(UpdateService.V142_FEATURE_POPUP_PREF_KEY, true).commit();
+            app.repository.db.setSyncState(UpdateService.V142_FEATURE_POPUP_PREF_KEY, "1");
+            uiHandler.post(this::showV142FeaturePopupForFiveSeconds);
+        });
+    }
+
+    private void showV142FeaturePopupForFiveSeconds() {
+        if (v142FeaturePopup == null || isFinishing() || isDestroyed()) return;
+        uiHandler.removeCallbacks(hideV142FeaturePopupRunnable);
+        v142FeaturePopup.setBackground(UiHelper.outlineBoxDrawable(0x6638BDF8, 0xFF0E1A30));
+        v142FeaturePopup.animate().cancel();
+        v142FeaturePopup.setAlpha(0f);
+        v142FeaturePopup.setTranslationY(-UiHelper.dp(this, 20));
+        v142FeaturePopup.setVisibility(View.VISIBLE);
+        v142FeaturePopup.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(240)
+                .start();
+
+        if (v142FeaturePopupBar != null) {
+            if (v142FeaturePopupAnimator != null) v142FeaturePopupAnimator.cancel();
+            v142FeaturePopupBar.setProgress(1000);
+            v142FeaturePopupAnimator = android.animation.ObjectAnimator.ofInt(v142FeaturePopupBar, "progress", 1000, 0);
+            v142FeaturePopupAnimator.setDuration(UpdateService.V142_FEATURE_POPUP_DURATION_MS);
+            v142FeaturePopupAnimator.setInterpolator(new android.view.animation.LinearInterpolator());
+            v142FeaturePopupAnimator.start();
+        }
+        uiHandler.postDelayed(hideV142FeaturePopupRunnable, UpdateService.V142_FEATURE_POPUP_DURATION_MS);
+    }
+
+    private void dismissV142FeaturePopup() {
+        uiHandler.removeCallbacks(hideV142FeaturePopupRunnable);
+        if (v142FeaturePopupAnimator != null) {
+            v142FeaturePopupAnimator.cancel();
+            v142FeaturePopupAnimator = null;
+        }
+        if (v142FeaturePopup != null && v142FeaturePopup.getVisibility() == View.VISIBLE) {
+            v142FeaturePopup.animate().cancel();
+            v142FeaturePopup.animate()
+                    .alpha(0f)
+                    .translationY(-UiHelper.dp(this, 16))
+                    .setDuration(220)
+                    .withEndAction(() -> {
+                        v142FeaturePopup.setVisibility(View.GONE);
+                        v142FeaturePopup.setAlpha(1f);
+                        v142FeaturePopup.setTranslationY(0f);
+                    })
+                    .start();
+        }
     }
 
     private void showThreeSecondUpdatePopup(Models.AppUpdateInfo info) {

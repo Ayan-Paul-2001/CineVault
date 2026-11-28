@@ -9,7 +9,7 @@ import {
   CIRCLEFTP_ORIGIN,
   CIRCLEFTP_API,
 } from "./config.js";
-import { listDirectory, mapWithConcurrency, checkServerHealth } from "./h5ai.js";
+import { listDirectory, mapWithConcurrency, checkServerHealth, classifyDiscoveredFolder, probeDirectoryServer, isBucketLikeName } from "./h5ai.js";
 import { crawlIccCategory, checkIccHealth, getIccSession } from "./icc.js";
 import {
   crawlCircleFtp,
@@ -32,6 +32,9 @@ import {
   getSyncState,
   getLibraryStats,
   getRecentlyWatchedSeriesIds,
+  getAllServers,
+  getEnabledServers,
+  updateServerFolders,
 } from "./db.js";
 import { hydrateItem } from "./metadata.js";
 
@@ -191,13 +194,13 @@ async function discoverExtraDhakaFlixCategories() {
  * Ultra-fast delta-aware parallel sync engine across DhakaFlix + ICC FTP + CircleFTP.
  * mode: "quick" | "full" | "icc" | "circle"
  */
-export async function startSync(mode = "full") {
+export async function startSync(mode = "full", targetServerId = null) {
   if (state.running) {
     return { started: false, reason: "already_running", status: getSyncStatus() };
   }
 
   state.running = true;
-  state.mode = mode;
+  state.mode = targetServerId ? `server:${targetServerId}` : mode;
   state.startedAt = Date.now();
   state.finishedAt = null;
   state.totalTasks = 1;
@@ -208,7 +211,7 @@ export async function startSync(mode = "full") {
   state.errors = [];
   emitProgress("start", true);
 
-  runUnifiedCrawl(mode).catch((err) => {
+  runUnifiedCrawl(mode, targetServerId).catch((err) => {
     state.errors.push(err.message);
     state.running = false;
     state.mode = "idle";
@@ -219,16 +222,29 @@ export async function startSync(mode = "full") {
   return { started: true, status: getSyncStatus() };
 }
 
-async function runUnifiedCrawl(mode) {
+async function runUnifiedCrawl(mode, targetServerId = null) {
   const isQuick = mode === "quick";
-  const runDf = mode === "full" || mode === "quick";
-  const runIcc = mode === "full" || mode === "quick" || mode === "icc";
-  const runCircle = mode === "full" || mode === "quick" || mode === "circle";
-  const runDiscovery = mode === "full" || mode === "quick" || mode === "discovery";
+  const enabledServers = getEnabledServers();
+  const scopedServers = targetServerId
+    ? enabledServers.filter((s) => s.id === targetServerId)
+    : enabledServers;
+
+  const enabledDfOrigins = new Set(scopedServers.filter((s) => s.adapter === "dhakaflix").map((s) => s.origin));
+  const enabledDiscOrigins = new Set(scopedServers.filter((s) => s.adapter === "discoveryftp").map((s) => s.origin));
+  const hasEnabledIcc = scopedServers.some((s) => s.adapter === "icc");
+  const hasEnabledCircle = scopedServers.some((s) => s.adapter === "circleftp");
+  const customDirServers = scopedServers.filter((s) => s.adapter === "directory");
+
+  const runDf = (mode === "full" || mode === "quick" || Boolean(targetServerId)) && enabledDfOrigins.size > 0;
+  const runIcc = (mode === "full" || mode === "quick" || mode === "icc" || Boolean(targetServerId)) && hasEnabledIcc;
+  const runCircle = (mode === "full" || mode === "quick" || mode === "circle" || Boolean(targetServerId)) && hasEnabledCircle;
+  const runDiscovery = (mode === "full" || mode === "quick" || mode === "discovery" || Boolean(targetServerId)) && enabledDiscOrigins.size > 0;
+  const runCustom = (mode === "full" || mode === "quick" || mode === "custom" || Boolean(targetServerId)) && customDirServers.length > 0;
 
   const existingUrlMap = loadExistingUrlIndex();
   const bucketMtimes = loadJsonState("df_bucket_mtimes", {});
   const discBucketMtimes = loadJsonState("disc_bucket_mtimes", {});
+  const customBucketMtimes = loadJsonState("custom_bucket_mtimes", {});
   const iccCatCounts = loadJsonState("icc_cat_counts", {});
   let circleMaxId = Number(getSyncState("circle_max_id") || 0);
 
@@ -238,16 +254,20 @@ async function runUnifiedCrawl(mode) {
 
   // Step 0: Fast parallel health check so offline nodes never stall sync
   const health = await getServersHealth(true);
-  const onlineOrigins = new Set(health.filter((s) => s.online).map((s) => s.origin));
-  const iccOnline = runIcc && onlineOrigins.has(ICC_ORIGIN);
-  const circleOnline = runCircle && onlineOrigins.has(CIRCLEFTP_ORIGIN);
+  const onlineOrigins = new Set(health.filter((s) => s.enabled !== false && s.online).map((s) => s.origin));
+  const iccOnline = runIcc && scopedServers.some((s) => s.adapter === "icc" && onlineOrigins.has(s.origin));
+  const circleOnline = runCircle && scopedServers.some((s) => s.adapter === "circleftp" && onlineOrigins.has(s.origin));
 
   const dfBaseCats = runDf
-    ? CATEGORIES.filter((c) => c.href && onlineOrigins.has(c.origin))
+    ? CATEGORIES.filter((c) => c.href && enabledDfOrigins.has(c.origin) && onlineOrigins.has(c.origin))
     : [];
 
   const discCats = runDiscovery
-    ? DISCOVERY_CATEGORIES.filter((c) => onlineOrigins.has(c.origin)).sort((a, b) => a.priority - b.priority)
+    ? DISCOVERY_CATEGORIES.filter((c) => enabledDiscOrigins.has(c.origin) && onlineOrigins.has(c.origin)).sort((a, b) => a.priority - b.priority)
+    : [];
+
+  const onlineCustomServers = runCustom
+    ? customDirServers.filter((s) => onlineOrigins.has(s.origin))
     : [];
 
   const QUICK_ICC_IDS = new Set([74, 44, 43, 2, 19, 73, 32, 33, 36, 72, 37, 78]);
@@ -256,7 +276,10 @@ async function runUnifiedCrawl(mode) {
     : [];
 
   const circleTaskWeight = circleOnline ? (hasExistingCircle && circleMaxId > 0 ? 1 : 20) : 0;
-  state.totalTasks = Math.max(1, dfBaseCats.length + discCats.length + iccTargets.length + circleTaskWeight);
+  state.totalTasks = Math.max(
+    1,
+    dfBaseCats.length + discCats.length + iccTargets.length + circleTaskWeight + onlineCustomServers.length
+  );
   emitProgress("progress", true);
 
   let totalWritten = 0;
@@ -527,17 +550,152 @@ async function runUnifiedCrawl(mode) {
           }
         })();
 
-  await Promise.all([dfTask, iccTask, circleTask, discoveryTask]);
+  const customDirectoryTask =
+    onlineCustomServers.length === 0
+      ? Promise.resolve()
+      : (async () => {
+          await mapWithConcurrency(onlineCustomServers, 4, async (srv) => {
+            try {
+              state.currentLabel = `${srv.name} › Scanning...`;
+              emitProgress();
+
+              const hasExistingForSrv = [...existingUrlMap.keys()].some((u) => u.startsWith(srv.origin));
+              let folderDefs = Array.isArray(srv.folders) && srv.folders.length > 0 ? srv.folders : [];
+
+              if (folderDefs.length === 0) {
+                const probed = await probeDirectoryServer(srv.origin + (srv.rootHref || "/"), 8000).catch(() => null);
+                if (probed?.ok && Array.isArray(probed.folders) && probed.folders.length > 0) {
+                  folderDefs = probed.folders.filter((f) => f.selected !== false);
+                  if (folderDefs.length > 0) {
+                    updateServerFolders(srv.id, folderDefs);
+                  }
+                } else {
+                  const rootEntries = await withOriginSlot(srv.origin, 4, () =>
+                    listDirectory(srv.origin, srv.rootHref || "/", 9000)
+                  );
+                  const rootDirs = rootEntries.filter((e) => e.isDir);
+                  const rootVideos = rootEntries.filter((e) => !e.isDir && e.kind === "video");
+                  if (rootDirs.length > 0) {
+                    folderDefs = rootDirs
+                      .map((d) => ({ name: d.name, href: d.href, ...classifyDiscoveredFolder(d.name) }))
+                      .filter((f) => !f.skipDefault);
+                  } else if (rootVideos.length > 0) {
+                    const catDef = { id: "foreign", mediaType: "movie", origin: srv.origin };
+                    for (const v of rootVideos) writeBuffer.push(buildH5aiRow(v, catDef, srv.name, srv.source));
+                    flushBuffer();
+                  }
+                }
+              }
+
+              if (folderDefs.length > 0) state.totalTasks += folderDefs.length;
+              const subQueue = [];
+              await mapWithConcurrency(folderDefs, 4, async (folder) => {
+                try {
+                  state.currentLabel = `${srv.name} › ${folder.name}`;
+                  emitProgress();
+                  const catDef = {
+                    id: folder.category || "foreign",
+                    shortLabel: folder.name,
+                    mediaType: folder.mediaType || "movie",
+                    origin: srv.origin,
+                    href: folder.href,
+                  };
+                  const children = await withOriginSlot(srv.origin, 4, () =>
+                    listDirectory(srv.origin, folder.href, 9000)
+                  );
+                  const dirs = children.filter((e) => e.isDir);
+                  const videos = children.filter((e) => !e.isDir && e.kind === "video");
+
+                  if (folder.mode === "flat" || dirs.length === 0) {
+                    if (dirs.length > 0) {
+                      writeBuffer.push(...dirs.map((d) => buildH5aiRow(d, catDef, folder.name, srv.source)));
+                    } else if (videos.length > 0) {
+                      writeBuffer.push(...videos.map((v) => buildH5aiRow(v, catDef, folder.name, srv.source)));
+                    }
+                    flushBuffer();
+                  } else {
+                    // Check if children look like year/alphabet buckets (including "(A-L)", "(0-9)", "2026", "Before 2000") or direct title folders
+                    let buckets = dirs.sort((a, b) => bucketPriorityScore(b.name) - bucketPriorityScore(a.name));
+                    const bucketHits = buckets.filter((d) => isBucketLikeName(d.name)).length;
+                    const looksLikeBuckets =
+                      buckets.length <= 50 &&
+                      (bucketHits / buckets.length >= 0.35 ||
+                        buckets.some((d) => isBucketLikeName(d.name) || /^latest|^new\b/i.test(d.name.trim())));
+                    if (!looksLikeBuckets) {
+                      writeBuffer.push(...dirs.map((d) => buildH5aiRow(d, catDef, folder.name, srv.source)));
+                      if (videos.length > 0) {
+                        writeBuffer.push(...videos.map((v) => buildH5aiRow(v, catDef, folder.name, srv.source)));
+                      }
+                      flushBuffer();
+                    } else {
+                      if (isQuick && hasExistingForSrv) buckets = buckets.slice(0, 2);
+                      for (const b of buckets) {
+                        const prevTime = customBucketMtimes[b.url];
+                        if (prevTime && b.time && b.time <= prevTime && hasExistingForSrv) continue;
+                        subQueue.push({ srv, catDef, bucket: b });
+                      }
+                    }
+                  }
+                } catch (err) {
+                  state.errors.push(`${srv.name} ${folder.name}: ${err.message}`);
+                } finally {
+                  state.completedTasks++;
+                  emitProgress();
+                }
+              });
+
+              if (subQueue.length > 0) {
+                state.totalTasks += subQueue.length;
+                await mapWithConcurrency(subQueue, 6, async ({ catDef, bucket }) => {
+                  try {
+                    state.currentLabel = `${srv.name} › ${catDef.shortLabel} › ${bucket.name}`;
+                    const entries = await withOriginSlot(srv.origin, 4, () =>
+                      listDirectory(srv.origin, bucket.href, 9000)
+                    );
+                    const subDirs = entries.filter((e) => e.isDir);
+                    const directVideos = entries.filter((e) => !e.isDir && e.kind === "video");
+                    if (subDirs.length > 0) {
+                      writeBuffer.push(...subDirs.map((d) => buildH5aiRow(d, catDef, bucket.name, srv.source)));
+                    }
+                    if (directVideos.length > 0) {
+                      if (subDirs.length === 0 && directVideos.length <= 2 && !isBucketLikeName(bucket.name)) {
+                        writeBuffer.push(buildH5aiRow(bucket, catDef, null, srv.source));
+                      } else {
+                        // Flat year/bucket folder full of direct video files (e.g. Movies/2026/*.mkv) -> index each movie!
+                        writeBuffer.push(...directVideos.map((v) => buildH5aiRow(v, catDef, bucket.name, srv.source)));
+                      }
+                    }
+                    if (bucket.time) customBucketMtimes[bucket.url] = bucket.time;
+                    flushBuffer();
+                  } catch (err) {
+                    state.errors.push(`${srv.name}/${bucket.name}: ${err.message}`);
+                  } finally {
+                    state.completedTasks++;
+                    emitProgress();
+                  }
+                });
+              }
+            } catch (err) {
+              state.errors.push(`${srv.name}: ${err.message}`);
+            } finally {
+              state.completedTasks++;
+              emitProgress();
+            }
+          });
+        })();
+
+  await Promise.all([dfTask, iccTask, circleTask, discoveryTask, customDirectoryTask]);
   flushBuffer(true);
 
   setSyncState("df_bucket_mtimes", JSON.stringify(bucketMtimes));
   setSyncState("disc_bucket_mtimes", JSON.stringify(discBucketMtimes));
+  setSyncState("custom_bucket_mtimes", JSON.stringify(customBucketMtimes));
   setSyncState("icc_cat_counts", JSON.stringify(iccCatCounts));
   if (circleMaxId > 0) setSyncState("circle_max_id", String(circleMaxId));
 
   let dedupSummary = null;
   if (totalWritten > 0) {
-    state.currentLabel = "Merging all 4 servers & selecting highest quality...";
+    state.currentLabel = "Merging all servers & selecting highest quality...";
     emitProgress("progress", true);
     dedupSummary = runDeduplication();
   }
@@ -673,17 +831,26 @@ function buildCircleRow(post) {
 let cachedHealth = null;
 let healthCheckedAt = 0;
 
+export function invalidateHealthCache() {
+  cachedHealth = null;
+  healthCheckedAt = 0;
+}
+
 export async function getServersHealth(force = false) {
   if (!force && cachedHealth && Date.now() - healthCheckedAt < 30000) {
     return cachedHealth;
   }
+  const allServers = getAllServers();
   const results = await Promise.all(
-    SERVERS.map(async (s) => {
-      if (s.source === "icc") {
+    allServers.map(async (s) => {
+      if (!s.enabled) {
+        return { ...s, online: false, latencyMs: null, reason: "Disabled" };
+      }
+      if (s.adapter === "icc") {
         const icc = await checkIccHealth();
         return { ...s, ...icc };
       }
-      if (s.source === "circleftp") {
+      if (s.adapter === "circleftp") {
         const cf = await checkCircleHealth();
         return { ...s, ...cf };
       }

@@ -253,18 +253,40 @@
 
                 <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Servers Health &amp; Auto-Sync" android:textColor="@color/cv_text" android:textSize="21sp" android:textStyle="bold" />
 
-                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="Manage DhakaFlix, ICC FTP, CircleFTP, DiscoveryFTP, background auto-sync, and app updates." android:textColor="@color/cv_text_muted" android:textSize="12.5sp" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="Add, remove, or toggle any FTP server, manage background auto-sync, and check app updates." android:textColor="@color/cv_text_muted" android:textSize="12.5sp" />
 
                 <!-- 1. On-Device SQLite Library & Manual Sync -->
                 <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:background="@drawable/bg_card_rounded" android:orientation="vertical" android:padding="14dp">
 
-                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="On-Device SQLite Library" android:textColor="@color/cv_text" android:textSize="14.5sp" android:textStyle="bold" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Library Catalog &amp; Sync" android:textColor="@color/cv_text" android:textSize="14.5sp" android:textStyle="bold" />
 
-                    <TextView android:id="@+id/srv_stats_summary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:textColor="@color/cv_text" android:textSize="13sp" android:textStyle="bold" />
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:orientation="horizontal">
 
-                    <TextView android:id="@+id/srv_stats_dups" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:textColor="@color/cv_text_muted" android:textSize="12sp" />
+                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginEnd="6dp" android:layout_weight="1" android:background="@drawable/bg_input_box" android:gravity="center" android:orientation="vertical" android:paddingVertical="10dp">
 
-                    <TextView android:id="@+id/srv_stats_sources" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:textColor="@color/cv_sky" android:textSize="12sp" />
+                            <TextView android:id="@+id/srv_metric_total" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="0" android:textColor="@color/cv_text" android:textSize="18sp" android:textStyle="bold" />
+
+                            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="Active Titles" android:textColor="@color/cv_text_muted" android:textSize="10.5sp" />
+                        </LinearLayout>
+
+                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_marginEnd="6dp" android:layout_weight="1" android:background="@drawable/bg_input_box" android:gravity="center" android:orientation="vertical" android:paddingVertical="10dp">
+
+                            <TextView android:id="@+id/srv_metric_movies" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="0" android:textColor="@color/cv_text" android:textSize="18sp" android:textStyle="bold" />
+
+                            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="Movies" android:textColor="@color/cv_text_muted" android:textSize="10.5sp" />
+                        </LinearLayout>
+
+                        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:background="@drawable/bg_input_box" android:gravity="center" android:orientation="vertical" android:paddingVertical="10dp">
+
+                            <TextView android:id="@+id/srv_metric_series" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="0" android:textColor="@color/cv_text" android:textSize="18sp" android:textStyle="bold" />
+
+                            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="TV &amp; Anime" android:textColor="@color/cv_text_muted" android:textSize="10.5sp" />
+                        </LinearLayout>
+                    </LinearLayout>
+
+                    <TextView android:id="@+id/srv_stats_dups" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="9dp" android:textColor="@color/cv_text_muted" android:textSize="11.5sp" />
+
+                    <TextView android:id="@+id/srv_stats_sources" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:textColor="@color/cv_sky" android:textSize="11.5sp" />
 
                     <TextView android:id="@+id/srv_sync_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:textColor="@color/cv_green" android:textSize="12sp" android:visibility="gone" />
 
@@ -303,17 +325,23 @@
                     </LinearLayout>
                 </LinearLayout>
 
-                <!-- 3. Merged Source Servers Health -->
+                <!-- 3. Dynamic Source Servers Manager -->
                 <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:background="@drawable/bg_card_rounded" android:orientation="vertical" android:padding="14dp">
 
-                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+                    <TextView android:id="@+id/srv_list_header_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Connected FTP Servers" android:textColor="@color/cv_text" android:textSize="15sp" android:textStyle="bold" />
 
-                        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Merged Source Servers" android:textColor="@color/cv_text" android:textSize="14.5sp" android:textStyle="bold" />
+                    <TextView android:id="@+id/srv_list_status_strip" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="Tap + Add Server to connect any HTTP/FTP directory" android:textColor="@color/cv_text_muted" android:textSize="11.5sp" />
 
-                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_srv_ping_all" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content" android:layout_height="36dp" android:text="Ping All" android:textAllCaps="false" android:textColor="@color/cv_sky" android:textSize="12sp" app:strokeColor="@color/cv_border" />
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:gravity="center_vertical" android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_srv_add_server" android:layout_width="0dp" android:layout_height="40dp" android:layout_marginEnd="6dp" android:layout_weight="1.25" android:text="+ Add Server" android:textAllCaps="false" android:textSize="12sp" app:backgroundTint="@color/cv_accent" />
+
+                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_srv_reset_defaults" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="40dp" android:layout_marginEnd="6dp" android:layout_weight="0.88" android:text="Defaults" android:textAllCaps="false" android:textColor="@color/cv_text_muted" android:textSize="11.5sp" app:strokeColor="@color/cv_border" />
+
+                        <com.google.android.material.button.MaterialButton android:id="@+id/btn_srv_ping_all" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="40dp" android:layout_weight="0.88" android:text="Ping All" android:textAllCaps="false" android:textColor="@color/cv_sky" android:textSize="11.5sp" app:strokeColor="@color/cv_border" />
                     </LinearLayout>
 
-                    <LinearLayout android:id="@+id/srv_health_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:orientation="vertical" />
+                    <LinearLayout android:id="@+id/srv_health_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:orientation="vertical" />
                 </LinearLayout>
 
                 <!-- 4. App Updates Card (embedded release source hidden from UI) -->
@@ -323,7 +351,7 @@
 
                         <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="App Updates" android:textColor="@color/cv_text" android:textSize="14.5sp" android:textStyle="bold" />
 
-                        <TextView android:id="@+id/srv_app_version" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="V1.3.1" android:textColor="@color/cv_sky" android:textSize="12sp" android:textStyle="bold" />
+                        <TextView android:id="@+id/srv_app_version" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="V1.4.2" android:textColor="@color/cv_sky" android:textSize="12sp" android:textStyle="bold" />
                     </LinearLayout>
 
                     <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="CineVault automatically checks for updates in the background every 60 minutes. You can also check manually anytime below." android:textColor="@color/cv_text_muted" android:textSize="12sp" />
@@ -338,7 +366,54 @@
                 </LinearLayout>
             </LinearLayout>
         </androidx.core.widget.NestedScrollView>
+
+        <!-- V1.4.2-Only One-Time 5-Second New Server Adding Feature Popup (auto-dismisses after 5s) -->
+        <LinearLayout android:id="@+id/v142_feature_popup" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_gravity="top|center_horizontal" android:layout_marginHorizontal="14dp" android:layout_marginTop="12dp" android:background="@drawable/bg_card_rounded" android:elevation="14dp" android:orientation="vertical" android:visibility="gone">
+
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal" android:paddingHorizontal="14dp" android:paddingTop="12dp" android:paddingBottom="10dp">
+
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:letterSpacing="0.08" android:text="NEW IN V1.4.2 · DYNAMIC FTP SERVERS" android:textColor="@color/cv_sky" android:textSize="10.5sp" android:textStyle="bold" />
+
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="Add Any Wi-Fi FTP Server Automatically" android:textColor="#FFFFFF" android:textSize="14.5sp" android:textStyle="bold" />
+
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="Open Servers -> + Add Server and paste any FTP URL on your Wi-Fi. Compatible folders are detected, synced, and merged automatically." android:textColor="@color/cv_text_muted" android:textSize="12sp" />
+                </LinearLayout>
+
+                <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:gravity="center_vertical" android:orientation="vertical">
+
+                    <ImageButton android:id="@+id/btn_v142_feature_close" android:layout_width="28dp" android:layout_height="28dp" android:layout_gravity="end" android:background="@drawable/bg_tv_button_focus" android:contentDescription="Close" android:focusable="true" android:src="@drawable/ic_close" app:tint="@color/cv_text_dim" />
+
+                    <TextView android:id="@+id/btn_v142_feature_open" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:background="@drawable/bg_tv_button_focus" android:clickable="true" android:focusable="true" android:paddingHorizontal="10dp" android:paddingVertical="5dp" android:text="Servers ->" android:textColor="@color/cv_sky" android:textSize="12sp" android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <ProgressBar android:id="@+id/v142_feature_popup_bar" style="?android:attr/progressBarStyleHorizontal" android:layout_width="match_parent" android:layout_height="3dp" android:max="1000" android:progress="1000" android:progressBackgroundTint="#1E38BDF8" android:progressTint="@color/cv_sky" />
+        </LinearLayout>
     </FrameLayout>
+
+    <!-- YouTube Premium-Style Minimizable In-App Mini-Player Drawer Bar -->
+    <LinearLayout android:id="@+id/mini_player_bar" android:layout_width="match_parent" android:layout_height="wrap_content" android:background="#121828" android:elevation="10dp" android:orientation="vertical" android:visibility="gone">
+
+        <ProgressBar android:id="@+id/mini_player_progress" style="?android:attr/progressBarStyleHorizontal" android:layout_width="match_parent" android:layout_height="2.5dp" android:max="1000" android:progress="0" android:progressBackgroundTint="#22FFFFFF" android:progressTint="@color/cv_accent" />
+
+        <LinearLayout android:id="@+id/mini_player_content" android:layout_width="match_parent" android:layout_height="58dp" android:background="@drawable/bg_tv_button_focus" android:clickable="true" android:focusable="true" android:gravity="center_vertical" android:orientation="horizontal" android:paddingEnd="6dp">
+
+            <androidx.media3.ui.PlayerView android:id="@+id/mini_player_video" android:layout_width="102dp" android:layout_height="58dp" android:background="#000000" app:resize_mode="zoom" app:surface_type="texture_view" app:use_controller="false" />
+
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:paddingHorizontal="10dp">
+
+                <TextView android:id="@+id/mini_player_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="#FFFFFF" android:textSize="13sp" android:textStyle="bold" />
+
+                <TextView android:id="@+id/mini_player_sub" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:ellipsize="end" android:maxLines="1" android:textColor="@color/cv_text_muted" android:textSize="11sp" />
+            </LinearLayout>
+
+            <ImageButton android:id="@+id/btn_mini_play_pause" android:layout_width="42dp" android:layout_height="42dp" android:background="@drawable/bg_tv_button_focus" android:contentDescription="Play or Pause" android:focusable="true" android:padding="9dp" android:src="@drawable/ic_pause" app:tint="#FFFFFF" />
+
+            <ImageButton android:id="@+id/btn_mini_close" android:layout_width="40dp" android:layout_height="40dp" android:background="@drawable/bg_tv_button_focus" android:contentDescription="Close mini player" android:focusable="true" android:padding="9dp" android:src="@drawable/ic_close" app:tint="@color/cv_text_muted" />
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- Bottom Navigation (5 Tabs: Home, Movies, TV & Anime, My List, Servers) -->
     <com.google.android.material.bottomnavigation.BottomNavigationView android:id="@+id/bottom_nav" android:layout_width="match_parent" android:layout_height="wrap_content" android:background="@color/cv_bg_elev" app:itemActiveIndicatorStyle="@null" app:itemIconTint="@color/nav_item_tint" app:itemTextColor="@color/nav_item_tint" app:labelVisibilityMode="labeled" app:menu="@menu/bottom_nav_menu" />

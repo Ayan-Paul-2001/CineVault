@@ -4,8 +4,8 @@ import { listDirectory, mapWithConcurrency } from "./h5ai.js";
 import { fetchIccPlayerDetails } from "./icc.js";
 import { fetchCirclePostDetails } from "./circleftp.js";
 import { parseEpisodeFile } from "./parser.js";
-import { getItemById, getMergedMirrors, updateItemHydration, updateItemMetadata } from "./db.js";
-import { DATA_DIR, isAllowedUrl, ICC_ORIGIN } from "./config.js";
+import { getItemById, getMergedMirrors, isMediaRowFromEnabledServer, updateItemHydration, updateItemMetadata } from "./db.js";
+import { DATA_DIR, isAllowedUrl, ICC_ORIGIN, getDynamicServerLabel } from "./config.js";
 
 const POSTER_CACHE_DIR = path.join(DATA_DIR, "posters");
 try {
@@ -296,6 +296,29 @@ async function hydrateIccItem(item, { deep = false } = {}) {
 }
 
 async function hydrateDhakaFlixItem(item, { deep = false } = {}) {
+  // Fast-path: direct video file URL on custom flat autoindex directories
+  if (item.href && !item.href.endsWith("/") && /\.(mkv|mp4|webm|avi|mov|m4v|ts|flv|wmv|mpg|mpeg)$/i.test(item.raw_name || item.href)) {
+    const directFile = {
+      name: item.raw_name || item.title,
+      href: item.href,
+      url: item.url,
+      isDir: false,
+      size: item.total_size || 0,
+      time: item.modified_at || 0,
+      kind: "video",
+      ...parseEpisodeFile(item.raw_name || item.title, 0),
+      quality: inferQualityFromText(item.raw_name || item.title),
+    };
+    updateItemHydration(item.id, {
+      posterUrl: item.poster_url || null,
+      posterChecked: 1,
+      filesJson: JSON.stringify([directFile]),
+      seasonsJson: JSON.stringify([]),
+      totalSize: item.total_size || 0,
+    });
+    return getItemById(item.id);
+  }
+
   const entries = await listDirectory(item.origin, item.href, 10000);
   const images = entries.filter((e) => !e.isDir && e.kind === "image");
   const videos = entries.filter((e) => !e.isDir && e.kind === "video");
@@ -745,7 +768,13 @@ export function getServerDisplayName(item) {
   if (item.source === "icc" || (item.origin || "").includes("10.16.100.")) return "ICC FTP";
   const m = (item.origin || "").match(/172\.16\.50\.(\d+)/);
   if (m) return `DhakaFlix ${m[1]}`;
-  return "DhakaFlix";
+  const custom = getDynamicServerLabel(item.source, item.origin);
+  if (custom) return custom;
+  try {
+    return new URL(item.origin || item.url).hostname;
+  } catch {
+    return item.source || "Server";
+  }
 }
 
 export function inferQualityFromText(text, fallback = null) {
@@ -774,7 +803,7 @@ function qualityRankValue(q) {
  * with direct Play / Download / VLC controls pointing to each quality's server!
  */
 export async function hydrateAllEditions(primaryItem, mirrors = [], { force = false } = {}) {
-  const candidates = [primaryItem, ...mirrors.slice(0, 10)];
+  const candidates = [primaryItem, ...mirrors.slice(0, 10)].filter((c) => isMediaRowFromEnabledServer(c));
 
   const hydrated = await mapWithConcurrency(candidates, 6, async (cand) => {
     try {
